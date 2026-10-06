@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/daksh-panchal/work-flow/internal/job"
+	"github.com/daksh-panchal/work-flow/internal/worker"
 	"github.com/google/uuid"
 )
 
@@ -25,19 +26,24 @@ type Pinger interface {
 }
 
 type Handler struct {
-	jobs   *job.Service
-	pinger Pinger
-	logger *slog.Logger
+	jobs    *job.Service
+	workers *worker.Service
+	pinger  Pinger
+	logger  *slog.Logger
 }
 
-func New(jobs *job.Service, pinger Pinger, logger *slog.Logger) http.Handler {
-	handler := &Handler{jobs: jobs, pinger: pinger, logger: logger}
+func New(jobs *job.Service, workers *worker.Service, pinger Pinger, logger *slog.Logger) http.Handler {
+	handler := &Handler{jobs: jobs, workers: workers, pinger: pinger, logger: logger}
 	mux := http.NewServeMux() // HTTP router that matches requests to handler functions
 	mux.HandleFunc("GET /health/live", handler.live)
 	mux.HandleFunc("GET /health/ready", handler.ready)
 	mux.HandleFunc("GET /openapi/v1.json", handler.openAPI)
 	mux.HandleFunc("POST /api/v1/jobs", handler.submitJob)
 	mux.HandleFunc("GET /api/v1/jobs/{id}", handler.getJob)
+	mux.HandleFunc("POST /api/v1/workers", handler.registerWorker)
+	mux.HandleFunc("POST /api/v1/workers/{workerId}/heartbeat", handler.heartbeatWorker)
+	mux.HandleFunc("POST /api/v1/workers/{workerId}/claims", handler.claimJob)
+	mux.HandleFunc("POST /api/v1/workers/{workerId}/jobs/{jobId}/lease", handler.renewLease)
 	return handler.recoverPanics(mux) // Request fails with 500 Internal Server Error if panic
 }
 
@@ -57,8 +63,33 @@ type jobResponse struct {
 	AttemptCount    int             `json:"attemptCount"`
 	MaximumAttempts int             `json:"maximumAttempts"`
 	AvailableAt     time.Time       `json:"availableAt"`
+	WorkerID        *uuid.UUID      `json:"workerId,omitempty"`
+	LeaseExpiresAt  *time.Time      `json:"leaseExpiresAt,omitempty"`
 	CreatedAt       time.Time       `json:"createdAt"`
 	UpdatedAt       time.Time       `json:"updatedAt"`
+}
+
+type registerWorkerRequest struct {
+	Name  string `json:"name"`
+	Queue string `json:"queue"`
+}
+
+type workerResponse struct {
+	ID         uuid.UUID `json:"id"`
+	Name       string    `json:"name"`
+	Queue      string    `json:"queue"`
+	LastSeenAt time.Time `json:"lastSeenAt"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+}
+
+type claimResponse struct {
+	Job        jobResponse `json:"job"`
+	LeaseToken uuid.UUID   `json:"leaseToken"`
+}
+
+type renewLeaseRequest struct {
+	LeaseToken uuid.UUID `json:"leaseToken"`
 }
 
 type problem struct {
@@ -127,6 +158,112 @@ func (handler *Handler) getJob(writer http.ResponseWriter, request *http.Request
 	handler.writeJSON(writer, http.StatusOK, responseFromJob(stored))
 }
 
+func (handler *Handler) registerWorker(writer http.ResponseWriter, request *http.Request) {
+	var body registerWorkerRequest
+	if err := decodeJSON(writer, request, &body); err != nil {
+		handler.writeProblem(writer, http.StatusBadRequest, "Invalid request", err.Error())
+		return
+	}
+
+	registered, err := handler.workers.Register(request.Context(), body.Name, body.Queue)
+	if errors.Is(err, worker.ErrInvalidRegistration) {
+		handler.writeProblem(writer, http.StatusBadRequest, "Invalid worker registration", err.Error())
+		return
+	}
+	if err != nil {
+		handler.logger.Error("register worker", "error", err)
+		handler.writeProblem(writer, http.StatusInternalServerError, "Internal server error", "")
+		return
+	}
+
+	handler.writeJSON(writer, http.StatusCreated, responseFromWorker(registered))
+}
+
+func (handler *Handler) heartbeatWorker(writer http.ResponseWriter, request *http.Request) {
+	workerID, ok := handler.parsePathUUID(writer, request, "workerId", "worker ID")
+	if !ok {
+		return
+	}
+
+	registered, err := handler.workers.Heartbeat(request.Context(), workerID)
+	if errors.Is(err, worker.ErrNotFound) {
+		handler.writeProblem(writer, http.StatusNotFound, "Worker not found", "")
+		return
+	}
+	if err != nil {
+		handler.logger.Error("heartbeat worker", "worker_id", workerID, "error", err)
+		handler.writeProblem(writer, http.StatusInternalServerError, "Internal server error", "")
+		return
+	}
+	handler.writeJSON(writer, http.StatusOK, responseFromWorker(registered))
+}
+
+func (handler *Handler) claimJob(writer http.ResponseWriter, request *http.Request) {
+	workerID, ok := handler.parsePathUUID(writer, request, "workerId", "worker ID")
+	if !ok {
+		return
+	}
+
+	claimed, found, err := handler.workers.Claim(request.Context(), workerID)
+	if errors.Is(err, worker.ErrNotFound) {
+		handler.writeProblem(writer, http.StatusNotFound, "Worker not found", "")
+		return
+	}
+	if err != nil {
+		handler.logger.Error("claim job", "worker_id", workerID, "error", err)
+		handler.writeProblem(writer, http.StatusInternalServerError, "Internal server error", "")
+		return
+	}
+	if !found {
+		writer.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if claimed.LeaseToken == nil {
+		handler.logger.Error("claimed job has no lease token", "job_id", claimed.ID)
+		handler.writeProblem(writer, http.StatusInternalServerError, "Internal server error", "")
+		return
+	}
+
+	handler.writeJSON(writer, http.StatusOK, claimResponse{
+		Job:        responseFromJob(claimed),
+		LeaseToken: *claimed.LeaseToken,
+	})
+}
+
+func (handler *Handler) renewLease(writer http.ResponseWriter, request *http.Request) {
+	workerID, ok := handler.parsePathUUID(writer, request, "workerId", "worker ID")
+	if !ok {
+		return
+	}
+	jobID, ok := handler.parsePathUUID(writer, request, "jobId", "job ID")
+	if !ok {
+		return
+	}
+
+	var body renewLeaseRequest
+	if err := decodeJSON(writer, request, &body); err != nil || body.LeaseToken == uuid.Nil {
+		detail := "leaseToken must be a UUID"
+		if err != nil {
+			detail = err.Error()
+		}
+		handler.writeProblem(writer, http.StatusBadRequest, "Invalid lease renewal", detail)
+		return
+	}
+
+	renewed, err := handler.workers.RenewLease(request.Context(), workerID, jobID, body.LeaseToken)
+	switch {
+	case errors.Is(err, worker.ErrNotFound):
+		handler.writeProblem(writer, http.StatusNotFound, "Worker not found", "")
+	case errors.Is(err, job.ErrLeaseLost):
+		handler.writeProblem(writer, http.StatusConflict, "Lease lost", err.Error())
+	case err != nil:
+		handler.logger.Error("renew job lease", "worker_id", workerID, "job_id", jobID, "error", err)
+		handler.writeProblem(writer, http.StatusInternalServerError, "Internal server error", "")
+	default:
+		handler.writeJSON(writer, http.StatusOK, responseFromJob(renewed))
+	}
+}
+
 func (handler *Handler) live(writer http.ResponseWriter, _ *http.Request) { // Confirm HTTP app running
 	writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	writer.WriteHeader(http.StatusOK)
@@ -187,9 +324,36 @@ func responseFromJob(stored job.Job) jobResponse {
 		AttemptCount:    stored.AttemptCount,
 		MaximumAttempts: stored.MaximumAttempts,
 		AvailableAt:     stored.AvailableAt,
+		WorkerID:        stored.WorkerID,
+		LeaseExpiresAt:  stored.LeaseExpiresAt,
 		CreatedAt:       stored.CreatedAt,
 		UpdatedAt:       stored.UpdatedAt,
 	}
+}
+
+func responseFromWorker(registered worker.Worker) workerResponse {
+	return workerResponse{
+		ID:         registered.ID,
+		Name:       registered.Name,
+		Queue:      registered.Queue,
+		LastSeenAt: registered.LastSeenAt,
+		CreatedAt:  registered.CreatedAt,
+		UpdatedAt:  registered.UpdatedAt,
+	}
+}
+
+func (handler *Handler) parsePathUUID(
+	writer http.ResponseWriter,
+	request *http.Request,
+	parameter string,
+	label string,
+) (uuid.UUID, bool) {
+	id, err := uuid.Parse(request.PathValue(parameter))
+	if err != nil {
+		handler.writeProblem(writer, http.StatusBadRequest, "Invalid "+label, label+" must be a UUID")
+		return uuid.Nil, false
+	}
+	return id, true
 }
 
 func (handler *Handler) writeProblem(writer http.ResponseWriter, status int, title, detail string) {

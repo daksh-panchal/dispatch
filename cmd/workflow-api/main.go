@@ -13,12 +13,14 @@ import (
 	"github.com/daksh-panchal/work-flow/internal/httpapi"
 	"github.com/daksh-panchal/work-flow/internal/job"
 	workflowpostgres "github.com/daksh-panchal/work-flow/internal/postgres"
+	"github.com/daksh-panchal/work-flow/internal/worker"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
-	defaultAddress     = ":5080"
-	defaultDatabaseURL = "postgres://workflow:workflow_dev@localhost:5432/workflow?sslmode=disable"
+	defaultAddress       = ":5080"
+	defaultDatabaseURL   = "postgres://workflow:workflow_dev@localhost:5432/workflow?sslmode=disable"
+	defaultLeaseDuration = 30 * time.Second
 )
 
 func main() {
@@ -53,12 +55,14 @@ func run(logger *slog.Logger) error {
 	}
 
 	// Create the application components and start HTTP server
-	repository := workflowpostgres.NewJobRepository(pool)
-	service := job.NewService(repository, time.Now)
+	jobRepository := workflowpostgres.NewJobRepository(pool)
+	workerRepository := workflowpostgres.NewWorkerRepository(pool)
+	jobService := job.NewService(jobRepository, time.Now)
+	workerService := worker.NewService(workerRepository, jobRepository, time.Now, defaultLeaseDuration)
 
 	server := &http.Server{
 		Addr:              environmentOrDefault("HTTP_ADDR", defaultAddress),
-		Handler:           httpapi.New(service, pool, logger),
+		Handler:           httpapi.New(jobService, workerService, pool, logger),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,

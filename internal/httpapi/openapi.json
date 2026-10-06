@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "work-flow API",
-    "version": "1.0.0"
+    "version": "2.0.0"
   },
   "paths": {
     "/health/live": {
@@ -18,11 +18,7 @@
         ],
         "requestBody": {
           "required": true,
-          "content": {
-            "application/json": {
-              "schema": { "$ref": "#/components/schemas/SubmitJob" }
-            }
-          }
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SubmitJob" } } }
         },
         "responses": {
           "201": { "description": "Job created" },
@@ -41,6 +37,58 @@
           "404": { "description": "Job not found" }
         }
       }
+    },
+    "/api/v1/workers": {
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RegisterWorker" } } }
+        },
+        "responses": {
+          "201": { "description": "Worker registered" },
+          "400": { "description": "Invalid worker registration" }
+        }
+      }
+    },
+    "/api/v1/workers/{workerId}/heartbeat": {
+      "post": {
+        "parameters": [
+          { "name": "workerId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Worker heartbeat recorded" },
+          "404": { "description": "Worker not found" }
+        }
+      }
+    },
+    "/api/v1/workers/{workerId}/claims": {
+      "post": {
+        "parameters": [
+          { "name": "workerId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Job claimed with a lease" },
+          "204": { "description": "No eligible job is available" },
+          "404": { "description": "Worker not found" }
+        }
+      }
+    },
+    "/api/v1/workers/{workerId}/jobs/{jobId}/lease": {
+      "post": {
+        "parameters": [
+          { "name": "workerId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "jobId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RenewLease" } } }
+        },
+        "responses": {
+          "200": { "description": "Lease renewed" },
+          "404": { "description": "Worker not found" },
+          "409": { "description": "Lease is expired or no longer owned by this worker" }
+        }
+      }
     }
   },
   "components": {
@@ -50,12 +98,26 @@
         "required": ["queue", "payload", "maximumAttempts"],
         "properties": {
           "queue": { "type": "string" },
-          "priority": { "type": "integer" },
+          "priority": { "type": "integer", "minimum": -1000, "maximum": 1000 },
           "payload": {},
           "maximumAttempts": { "type": "integer", "minimum": 1, "maximum": 100 }
+        }
+      },
+      "RegisterWorker": {
+        "type": "object",
+        "required": ["name", "queue"],
+        "properties": {
+          "name": { "type": "string", "maxLength": 100 },
+          "queue": { "type": "string", "maxLength": 100 }
+        }
+      },
+      "RenewLease": {
+        "type": "object",
+        "required": ["leaseToken"],
+        "properties": {
+          "leaseToken": { "type": "string", "format": "uuid" }
         }
       }
     }
   }
 }
-
