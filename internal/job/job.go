@@ -19,12 +19,17 @@ const (
 )
 
 type State string // create string-based type for job state to avoid accidental assignment of random strings
-const StateQueued State = "queued"
+
+const (
+	StateQueued  State = "queued"
+	StateRunning State = "running"
+)
 
 var (
 	ErrNotFound            = errors.New("job not found")
 	ErrIdempotencyConflict = errors.New("idempotency key is already used by a different submission")
 	ErrInvalidSubmission   = errors.New("invalid job submission")
+	ErrLeaseLost           = errors.New("job lease is no longer owned by this worker")
 )
 
 type Job struct {
@@ -38,8 +43,27 @@ type Job struct {
 	AttemptCount    int
 	MaximumAttempts int
 	AvailableAt     time.Time
+	WorkerID        *uuid.UUID
+	LeaseToken      *uuid.UUID
+	LeaseExpiresAt  *time.Time
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+}
+
+type ClaimParams struct {
+	WorkerID       uuid.UUID
+	Queue          string
+	LeaseToken     uuid.UUID
+	Now            time.Time
+	LeaseExpiresAt time.Time
+}
+
+type RenewLeaseParams struct {
+	JobID          uuid.UUID
+	WorkerID       uuid.UUID
+	LeaseToken     uuid.UUID
+	Now            time.Time
+	LeaseExpiresAt time.Time
 }
 
 type NewJobParams struct {
