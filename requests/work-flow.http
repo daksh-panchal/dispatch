@@ -1,5 +1,8 @@
 @baseUrl = http://localhost:5080
-@jobId = replace-with-job-id
+@jobId = 01a1040c-b739-7531-a794-276fe1d593ec
+@workerId = 01a11050-2eeb-77f6-b773-f471c252c0fc
+@claimedJobId = 01a11052-d37a-7191-be2b-b6d6754683a9
+@leaseToken = 01a11052-f3a9-7d3e-b118-2420b754cb62
 
 ### Liveness
 GET {{baseUrl}}/health/live
@@ -10,7 +13,7 @@ GET {{baseUrl}}/health/ready
 ### Submit a job
 POST {{baseUrl}}/api/v1/jobs
 Content-Type: application/json
-Idempotency-Key: example-build-002
+Idempotency-Key: example-build-005
 
 {
   "queue": "default",
@@ -24,3 +27,25 @@ Idempotency-Key: example-build-002
 ### Retrieve a job
 GET {{baseUrl}}/api/v1/jobs/{{jobId}}
 
+### Register a worker
+POST {{baseUrl}}/api/v1/workers
+Content-Type: application/json
+
+{
+  "name": "local-builder-2",
+  "queue": "default"
+}
+
+### Record a worker heartbeat
+POST {{baseUrl}}/api/v1/workers/{{workerId}}/heartbeat
+
+### Claim the highest-priority eligible job
+POST {{baseUrl}}/api/v1/workers/{{workerId}}/claims
+
+### Renew ownership of a claimed job
+POST {{baseUrl}}/api/v1/workers/{{workerId}}/jobs/{{claimedJobId}}/lease
+Content-Type: application/json
+
+{
+  "leaseToken": "{{leaseToken}}"
+}
