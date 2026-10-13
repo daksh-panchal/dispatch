@@ -2,11 +2,10 @@
 
 `work-flow` is a distributed job scheduler. It
 accepts jobs, persists their state, and coordinates workers that claim them for
-execution. Later milestones will add failure recovery, retries, completion, and
-cancellation.
+execution.
 
-Milestone 2 implements worker registration and exclusive job claiming with
-renewable leases. Job execution is deliberately outside this milestone.
+Milestone 3 adds durable outcomes, automatic retries, expired-lease recovery,
+and fencing that prevents a stale worker from changing a reassigned job.
 
 ## Structure
 
@@ -15,6 +14,7 @@ cmd/workflow-api       process entry point and dependency wiring
 internal/httpapi       HTTP transport
 internal/job           job model and application operations
 internal/worker        worker registration, heartbeat, and claim operations
+internal/recovery      background recovery of expired worker leases
 internal/postgres      PostgreSQL repository and migration runner
 migrations             embedded SQL schema migrations
 integration            end-to-end tests with a real PostgreSQL container
@@ -39,8 +39,19 @@ rules separate from HTTP and PostgreSQL without introducing separate services.
 - A claim moves the job from `queued` to `running`, increments its attempt count,
   and grants the worker a 30-second lease.
 - `POST /api/v1/workers/{workerId}/jobs/{jobId}/lease` renews a valid lease.
+- `POST /api/v1/workers/{workerId}/jobs/{jobId}/complete` records a successful
+  result and moves the job to `succeeded`.
+- `POST /api/v1/workers/{workerId}/jobs/{jobId}/fail` records an error. The job
+  is delayed and requeued when attempts remain, or moved to `failed` when its
+  retry budget is exhausted.
+- Retry delays use capped exponential backoff: 5 seconds, 10 seconds, 20
+  seconds, and so on, up to 5 minutes.
+- A background recovery loop finds expired leases every 2 seconds. It safely
+  requeues the job or permanently fails it when no attempts remain.
+- Completion, failure, and renewal require the current worker ID, lease token,
+  and an unexpired lease. A stale worker receives `409 Conflict`.
 - PostgreSQL row locking with `FOR UPDATE SKIP LOCKED` prevents concurrent workers
-  from claiming the same job.
+  from claiming or recovering the same job.
 
 ## Requirements
 
@@ -77,6 +88,8 @@ POST /api/v1/workers
 POST /api/v1/workers/{workerId}/heartbeat
 POST /api/v1/workers/{workerId}/claims
 POST /api/v1/workers/{workerId}/jobs/{jobId}/lease
+POST /api/v1/workers/{workerId}/jobs/{jobId}/complete
+POST /api/v1/workers/{workerId}/jobs/{jobId}/fail
 ```
 
 Example requests are in `requests/work-flow.http`.
@@ -96,15 +109,18 @@ Local defaults match `compose.yaml`. Override them with environment variables:
 
 ```text
 DATABASE_URL=postgres://user:password@host:5432/database?sslmode=require
-HTTP_ADDR=:5080
+HTTP_ADDR=127.0.0.1:5080
 ```
 
 The committed `workflow_dev` password protects only the disposable local Docker
 database and must never be reused outside local development.
 
+The local API and PostgreSQL port bind to `127.0.0.1`, so they are reachable
+from this computer only, not from other devices on the local network. A future
+deployment can deliberately override these bindings behind appropriate network
+controls and authentication.
+
 ## Later milestones
 
-- Expired-lease recovery and worker failure detection
-- Retry scheduling and recovery
-- Completion and cancellation races
+- Job cancellation and cancellation races
 - OpenTelemetry and production hardening
