@@ -21,8 +21,10 @@ const (
 type State string // create string-based type for job state to avoid accidental assignment of random strings
 
 const (
-	StateQueued  State = "queued"
-	StateRunning State = "running"
+	StateQueued    State = "queued"
+	StateRunning   State = "running"
+	StateSucceeded State = "succeeded"
+	StateFailed    State = "failed"
 )
 
 var (
@@ -30,6 +32,7 @@ var (
 	ErrIdempotencyConflict = errors.New("idempotency key is already used by a different submission")
 	ErrInvalidSubmission   = errors.New("invalid job submission")
 	ErrLeaseLost           = errors.New("job lease is no longer owned by this worker")
+	ErrInvalidOutcome      = errors.New("invalid job outcome")
 )
 
 type Job struct {
@@ -46,6 +49,9 @@ type Job struct {
 	WorkerID        *uuid.UUID
 	LeaseToken      *uuid.UUID
 	LeaseExpiresAt  *time.Time
+	Result          json.RawMessage
+	LastError       *string
+	FinishedAt      *time.Time
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 }
@@ -64,6 +70,28 @@ type RenewLeaseParams struct {
 	LeaseToken     uuid.UUID
 	Now            time.Time
 	LeaseExpiresAt time.Time
+}
+
+type CompleteParams struct {
+	JobID      uuid.UUID
+	WorkerID   uuid.UUID
+	LeaseToken uuid.UUID
+	Result     json.RawMessage
+	Now        time.Time
+}
+
+type FailParams struct {
+	JobID      uuid.UUID
+	WorkerID   uuid.UUID
+	LeaseToken uuid.UUID
+	Reason     string
+	Now        time.Time
+	RetryAt    time.Time
+}
+
+type RecoveryResult struct {
+	Requeued int64
+	Failed   int64
 }
 
 type NewJobParams struct {
