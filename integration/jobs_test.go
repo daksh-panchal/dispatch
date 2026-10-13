@@ -16,6 +16,7 @@ import (
 	"github.com/daksh-panchal/work-flow/internal/httpapi"
 	"github.com/daksh-panchal/work-flow/internal/job"
 	workflowpostgres "github.com/daksh-panchal/work-flow/internal/postgres"
+	"github.com/daksh-panchal/work-flow/internal/recovery"
 	"github.com/daksh-panchal/work-flow/internal/worker"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -60,7 +61,28 @@ func TestJobAPIAgainstPostgreSQL(t *testing.T) {
 	jobRepository := workflowpostgres.NewJobRepository(pool)
 	workerRepository := workflowpostgres.NewWorkerRepository(pool)
 	jobService := job.NewService(jobRepository, time.Now)
-	workerService := worker.NewService(workerRepository, jobRepository, time.Now, 30*time.Second)
+	const (
+		testLeaseDuration = 250 * time.Millisecond
+		testRetryBase     = 25 * time.Millisecond
+		testRetryMaximum  = 100 * time.Millisecond
+	)
+	workerService := worker.NewService(
+		workerRepository,
+		jobRepository,
+		time.Now,
+		testLeaseDuration,
+		testRetryBase,
+		testRetryMaximum,
+	)
+	recoveryService := recovery.NewService(
+		jobRepository,
+		time.Now,
+		time.Second,
+		testRetryBase,
+		testRetryMaximum,
+		100,
+		logger,
+	)
 	server := httptest.NewServer(httpapi.New(jobService, workerService, pool, logger))
 	t.Cleanup(server.Close)
 
@@ -203,6 +225,11 @@ func TestJobAPIAgainstPostgreSQL(t *testing.T) {
 		if originalExpiry == nil || renewed.LeaseExpiresAt == nil || renewed.LeaseExpiresAt.Before(*originalExpiry) {
 			t.Fatalf("renewed expiry = %v, original = %v", renewed.LeaseExpiresAt, originalExpiry)
 		}
+
+		status, _, err = completeJobResult(server.URL, registered.ID, claim.Job.ID, claim.LeaseToken, nil)
+		if err != nil || status != http.StatusOK {
+			t.Fatalf("complete claimed job: status = %d, error = %v", status, err)
+		}
 	})
 
 	t.Run("concurrent workers cannot claim the same job", func(t *testing.T) {
@@ -215,9 +242,10 @@ func TestJobAPIAgainstPostgreSQL(t *testing.T) {
 		}
 
 		type result struct {
-			status int
-			claim  apiClaim
-			err    error
+			workerID uuid.UUID
+			status   int
+			claim    apiClaim
+			err      error
 		}
 		results := make(chan result, workerCount)
 		var group sync.WaitGroup
@@ -226,13 +254,15 @@ func TestJobAPIAgainstPostgreSQL(t *testing.T) {
 			go func(workerID uuid.UUID) {
 				defer group.Done()
 				status, claim, err := claimJobResult(server.URL, workerID)
-				results <- result{status: status, claim: claim, err: err}
+				results <- result{workerID: workerID, status: status, claim: claim, err: err}
 			}(registered.ID)
 		}
 		group.Wait()
 		close(results)
 
 		claimedCount := 0
+		var winningWorkerID uuid.UUID
+		var winningClaim apiClaim
 		for result := range results {
 			if result.err != nil {
 				t.Fatalf("concurrent claim: %v", result.err)
@@ -240,6 +270,8 @@ func TestJobAPIAgainstPostgreSQL(t *testing.T) {
 			switch result.status {
 			case http.StatusOK:
 				claimedCount++
+				winningWorkerID = result.workerID
+				winningClaim = result.claim
 				if result.claim.Job.ID != expected.ID {
 					t.Fatalf("claimed job = %s, want %s", result.claim.Job.ID, expected.ID)
 				}
@@ -250,6 +282,162 @@ func TestJobAPIAgainstPostgreSQL(t *testing.T) {
 		}
 		if claimedCount != 1 {
 			t.Fatalf("successful claims = %d, want 1", claimedCount)
+		}
+
+		status, _, err := completeJobResult(server.URL, winningWorkerID, winningClaim.Job.ID, winningClaim.LeaseToken, nil)
+		if err != nil || status != http.StatusOK {
+			t.Fatalf("complete concurrently claimed job: status = %d, error = %v", status, err)
+		}
+	})
+
+	t.Run("current worker completes a job and stale completion is rejected", func(t *testing.T) {
+		queue := "complete-" + uuid.NewString()
+		_ = submitJobWithOptions(t, server.URL, "integration-"+uuid.NewString(), queue, "build", 0, http.StatusCreated)
+		registered := registerWorker(t, server.URL, "completion-worker", queue)
+		status, claim, err := claimJobResult(server.URL, registered.ID)
+		if err != nil || status != http.StatusOK {
+			t.Fatalf("claim status = %d, error = %v", status, err)
+		}
+
+		status, completed, err := completeJobResult(
+			server.URL,
+			registered.ID,
+			claim.Job.ID,
+			claim.LeaseToken,
+			map[string]any{"artifact": "build.zip"},
+		)
+		if err != nil {
+			t.Fatalf("complete job: %v", err)
+		}
+		if status != http.StatusOK || completed.State != "succeeded" || completed.FinishedAt == nil {
+			t.Fatalf("completed status = %d, job = %+v", status, completed)
+		}
+		if string(completed.Result) != `{"artifact":"build.zip"}` || completed.WorkerID != nil || completed.LeaseExpiresAt != nil {
+			t.Fatalf("completed job = %+v", completed)
+		}
+
+		status, _, err = completeJobResult(
+			server.URL,
+			registered.ID,
+			claim.Job.ID,
+			claim.LeaseToken,
+			map[string]any{"artifact": "late.zip"},
+		)
+		if err != nil {
+			t.Fatalf("repeat completion: %v", err)
+		}
+		if status != http.StatusConflict {
+			t.Fatalf("repeat completion status = %d, want %d", status, http.StatusConflict)
+		}
+	})
+
+	t.Run("reported failures retry and eventually become terminal", func(t *testing.T) {
+		queue := "failure-" + uuid.NewString()
+		_ = submitJobWithPolicy(t, server.URL, "integration-"+uuid.NewString(), queue, "fail", 0, 2, http.StatusCreated)
+		registered := registerWorker(t, server.URL, "failure-worker", queue)
+
+		status, firstClaim, err := claimJobResult(server.URL, registered.ID)
+		if err != nil || status != http.StatusOK {
+			t.Fatalf("first claim status = %d, error = %v", status, err)
+		}
+		status, retry, err := failJobResult(server.URL, registered.ID, firstClaim.Job.ID, firstClaim.LeaseToken, "compiler error")
+		if err != nil {
+			t.Fatalf("first failure: %v", err)
+		}
+		if status != http.StatusOK || retry.State != "queued" || retry.LastError == nil || retry.FinishedAt != nil {
+			t.Fatalf("retry status = %d, job = %+v", status, retry)
+		}
+
+		waitUntil(t, retry.AvailableAt)
+		status, secondClaim, err := claimJobResult(server.URL, registered.ID)
+		if err != nil || status != http.StatusOK {
+			t.Fatalf("second claim status = %d, error = %v", status, err)
+		}
+		status, terminal, err := failJobResult(server.URL, registered.ID, secondClaim.Job.ID, secondClaim.LeaseToken, "compiler error again")
+		if err != nil {
+			t.Fatalf("second failure: %v", err)
+		}
+		if status != http.StatusOK || terminal.State != "failed" || terminal.AttemptCount != 2 || terminal.FinishedAt == nil {
+			t.Fatalf("terminal status = %d, job = %+v", status, terminal)
+		}
+	})
+
+	t.Run("expired lease is recovered once and stale worker is fenced", func(t *testing.T) {
+		queue := "recovery-" + uuid.NewString()
+		_ = submitJobWithPolicy(t, server.URL, "integration-"+uuid.NewString(), queue, "recover", 0, 2, http.StatusCreated)
+		originalWorker := registerWorker(t, server.URL, "original-worker", queue)
+		replacementWorker := registerWorker(t, server.URL, "replacement-worker", queue)
+		status, originalClaim, err := claimJobResult(server.URL, originalWorker.ID)
+		if err != nil || status != http.StatusOK {
+			t.Fatalf("original claim status = %d, error = %v", status, err)
+		}
+		if originalClaim.Job.LeaseExpiresAt == nil {
+			t.Fatal("original claim has no lease expiry")
+		}
+		waitUntil(t, originalClaim.Job.LeaseExpiresAt.Add(10*time.Millisecond))
+
+		const recoveryCount = 8
+		results := make(chan job.RecoveryResult, recoveryCount)
+		errorsFound := make(chan error, recoveryCount)
+		var group sync.WaitGroup
+		for range recoveryCount {
+			group.Add(1)
+			go func() {
+				defer group.Done()
+				result, err := recoveryService.RecoverOnce(ctx)
+				results <- result
+				errorsFound <- err
+			}()
+		}
+		group.Wait()
+		close(results)
+		close(errorsFound)
+		for err := range errorsFound {
+			if err != nil {
+				t.Fatalf("recover expired job: %v", err)
+			}
+		}
+		var recovered int64
+		for result := range results {
+			recovered += result.Requeued + result.Failed
+		}
+		if recovered != 1 {
+			t.Fatalf("recovered jobs = %d, want 1", recovered)
+		}
+
+		recoveredJob := getJob(t, server.URL, originalClaim.Job.ID)
+		if recoveredJob.State != "queued" || recoveredJob.LastError == nil {
+			t.Fatalf("recovered job = %+v", recoveredJob)
+		}
+		waitUntil(t, recoveredJob.AvailableAt)
+		status, replacementClaim, err := claimJobResult(server.URL, replacementWorker.ID)
+		if err != nil || status != http.StatusOK {
+			t.Fatalf("replacement claim status = %d, error = %v", status, err)
+		}
+
+		status, _, err = completeJobResult(
+			server.URL,
+			originalWorker.ID,
+			originalClaim.Job.ID,
+			originalClaim.LeaseToken,
+			nil,
+		)
+		if err != nil {
+			t.Fatalf("stale completion: %v", err)
+		}
+		if status != http.StatusConflict {
+			t.Fatalf("stale completion status = %d, want %d", status, http.StatusConflict)
+		}
+
+		status, completed, err := completeJobResult(
+			server.URL,
+			replacementWorker.ID,
+			replacementClaim.Job.ID,
+			replacementClaim.LeaseToken,
+			nil,
+		)
+		if err != nil || status != http.StatusOK || completed.State != "succeeded" {
+			t.Fatalf("replacement completion status = %d, job = %+v, error = %v", status, completed, err)
 		}
 	})
 }
@@ -262,6 +450,10 @@ type apiJob struct {
 	AttemptCount   int             `json:"attemptCount"`
 	WorkerID       *uuid.UUID      `json:"workerId"`
 	LeaseExpiresAt *time.Time      `json:"leaseExpiresAt"`
+	AvailableAt    time.Time       `json:"availableAt"`
+	Result         json.RawMessage `json:"result"`
+	LastError      *string         `json:"lastError"`
+	FinishedAt     *time.Time      `json:"finishedAt"`
 }
 
 type apiWorker struct {
@@ -301,8 +493,21 @@ func submitJobWithOptions(
 	priority int,
 	expectedStatus int,
 ) apiJob {
+	return submitJobWithPolicy(t, baseURL, key, queue, command, priority, 3, expectedStatus)
+}
+
+func submitJobWithPolicy(
+	t *testing.T,
+	baseURL string,
+	key string,
+	queue string,
+	command string,
+	priority int,
+	maximumAttempts int,
+	expectedStatus int,
+) apiJob {
 	t.Helper()
-	status, stored, err := submitJobResultWithOptions(baseURL, key, queue, command, priority)
+	status, stored, err := submitJobResultWithPolicy(baseURL, key, queue, command, priority, maximumAttempts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,10 +518,14 @@ func submitJobWithOptions(
 }
 
 func submitJobResultWithOptions(baseURL, key, queue, command string, priority int) (int, apiJob, error) {
+	return submitJobResultWithPolicy(baseURL, key, queue, command, priority, 3)
+}
+
+func submitJobResultWithPolicy(baseURL, key, queue, command string, priority, maximumAttempts int) (int, apiJob, error) {
 	body, err := json.Marshal(map[string]any{
 		"queue":           queue,
 		"priority":        priority,
-		"maximumAttempts": 3,
+		"maximumAttempts": maximumAttempts,
 		"payload": map[string]any{
 			"command": command,
 		},
@@ -424,6 +633,89 @@ func renewLeaseResult(baseURL string, workerID, jobID, leaseToken uuid.UUID) (in
 		}
 	}
 	return response.StatusCode, renewed, nil
+}
+
+func completeJobResult(
+	baseURL string,
+	workerID uuid.UUID,
+	jobID uuid.UUID,
+	leaseToken uuid.UUID,
+	result any,
+) (int, apiJob, error) {
+	return postOutcomeResult(baseURL, workerID, jobID, "complete", map[string]any{
+		"leaseToken": leaseToken,
+		"result":     result,
+	})
+}
+
+func failJobResult(
+	baseURL string,
+	workerID uuid.UUID,
+	jobID uuid.UUID,
+	leaseToken uuid.UUID,
+	reason string,
+) (int, apiJob, error) {
+	return postOutcomeResult(baseURL, workerID, jobID, "fail", map[string]any{
+		"leaseToken": leaseToken,
+		"error":      reason,
+	})
+}
+
+func postOutcomeResult(
+	baseURL string,
+	workerID uuid.UUID,
+	jobID uuid.UUID,
+	action string,
+	bodyValue any,
+) (int, apiJob, error) {
+	body, err := json.Marshal(bodyValue)
+	if err != nil {
+		return 0, apiJob{}, err
+	}
+	request, err := http.NewRequest(
+		http.MethodPost,
+		baseURL+"/api/v1/workers/"+workerID.String()+"/jobs/"+jobID.String()+"/"+action,
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return 0, apiJob{}, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return 0, apiJob{}, err
+	}
+	defer response.Body.Close()
+
+	var stored apiJob
+	if response.StatusCode == http.StatusOK {
+		if err := json.NewDecoder(response.Body).Decode(&stored); err != nil {
+			return response.StatusCode, apiJob{}, err
+		}
+	}
+	return response.StatusCode, stored, nil
+}
+
+func getJob(t *testing.T, baseURL string, id uuid.UUID) apiJob {
+	t.Helper()
+	response, err := http.Get(baseURL + "/api/v1/jobs/" + id.String())
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("get job status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+	var stored apiJob
+	decodeResponse(t, response, &stored)
+	return stored
+}
+
+func waitUntil(t *testing.T, instant time.Time) {
+	t.Helper()
+	if delay := time.Until(instant); delay > 0 {
+		time.Sleep(delay)
+	}
 }
 
 func decodeResponse(t *testing.T, response *http.Response, destination any) {
