@@ -13,14 +13,19 @@ import (
 	"github.com/daksh-panchal/work-flow/internal/httpapi"
 	"github.com/daksh-panchal/work-flow/internal/job"
 	workflowpostgres "github.com/daksh-panchal/work-flow/internal/postgres"
+	"github.com/daksh-panchal/work-flow/internal/recovery"
 	"github.com/daksh-panchal/work-flow/internal/worker"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
-	defaultAddress       = ":5080"
+	defaultAddress       = "127.0.0.1:5080"
 	defaultDatabaseURL   = "postgres://workflow:workflow_dev@localhost:5432/workflow?sslmode=disable"
 	defaultLeaseDuration = 30 * time.Second
+	defaultRetryBase     = 5 * time.Second
+	defaultRetryMaximum  = 5 * time.Minute
+	defaultRecoveryEvery = 2 * time.Second
+	defaultRecoveryBatch = 100
 )
 
 func main() {
@@ -58,7 +63,24 @@ func run(logger *slog.Logger) error {
 	jobRepository := workflowpostgres.NewJobRepository(pool)
 	workerRepository := workflowpostgres.NewWorkerRepository(pool)
 	jobService := job.NewService(jobRepository, time.Now)
-	workerService := worker.NewService(workerRepository, jobRepository, time.Now, defaultLeaseDuration)
+	workerService := worker.NewService(
+		workerRepository,
+		jobRepository,
+		time.Now,
+		defaultLeaseDuration,
+		defaultRetryBase,
+		defaultRetryMaximum,
+	)
+	recoveryService := recovery.NewService(
+		jobRepository,
+		time.Now,
+		defaultRecoveryEvery,
+		defaultRetryBase,
+		defaultRetryMaximum,
+		defaultRecoveryBatch,
+		logger,
+	)
+	go recoveryService.Run(ctx)
 
 	server := &http.Server{
 		Addr:              environmentOrDefault("HTTP_ADDR", defaultAddress),

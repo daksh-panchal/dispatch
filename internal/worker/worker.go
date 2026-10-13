@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -12,8 +13,9 @@ import (
 )
 
 const (
-	maxNameLength  = 100
-	maxQueueLength = 100
+	maxNameLength          = 100
+	maxQueueLength         = 100
+	maxFailureReasonLength = 4000
 )
 
 var (
@@ -35,29 +37,38 @@ type Repository interface { // Defines the methods that the worker repository mu
 	Heartbeat(context.Context, uuid.UUID, time.Time) (Worker, error)
 }
 
-type JobLeaser interface {
+type JobStore interface {
+	Get(context.Context, uuid.UUID) (job.Job, error)
 	Claim(context.Context, job.ClaimParams) (job.Job, bool, error)
 	RenewLease(context.Context, job.RenewLeaseParams) (job.Job, error)
+	Complete(context.Context, job.CompleteParams) (job.Job, error)
+	Fail(context.Context, job.FailParams) (job.Job, error)
 }
 
 type Service struct {
 	workers       Repository
-	jobs          JobLeaser
+	jobs          JobStore
 	now           func() time.Time
 	leaseDuration time.Duration // how long job ownership lasts before renewal is required
+	retryBase     time.Duration
+	retryMaximum  time.Duration
 }
 
 func NewService(
 	workers Repository,
-	jobs JobLeaser,
+	jobs JobStore,
 	now func() time.Time,
 	leaseDuration time.Duration,
+	retryBase time.Duration,
+	retryMaximum time.Duration,
 ) *Service {
 	return &Service{
 		workers:       workers,
 		jobs:          jobs,
 		now:           now,
 		leaseDuration: leaseDuration,
+		retryBase:     retryBase,
+		retryMaximum:  retryMaximum,
 	}
 }
 
@@ -150,4 +161,88 @@ func (service *Service) RenewLease(
 		return job.Job{}, err
 	}
 	return renewed, nil
+}
+
+func (service *Service) Complete(
+	ctx context.Context,
+	workerID uuid.UUID,
+	jobID uuid.UUID,
+	leaseToken uuid.UUID,
+	result json.RawMessage,
+) (job.Job, error) {
+	if len(result) == 0 {
+		result = json.RawMessage(`{}`)
+	}
+	if !json.Valid(result) {
+		return job.Job{}, fmt.Errorf("%w: result must be valid JSON", job.ErrInvalidOutcome)
+	}
+	result = append(json.RawMessage(nil), result...)
+
+	now := service.now().UTC()
+	if _, err := service.workers.Heartbeat(ctx, workerID, now); err != nil {
+		return job.Job{}, err
+	}
+	completed, err := service.jobs.Complete(ctx, job.CompleteParams{
+		JobID:      jobID,
+		WorkerID:   workerID,
+		LeaseToken: leaseToken,
+		Result:     result,
+		Now:        now,
+	})
+	if err != nil {
+		return job.Job{}, err
+	}
+	return completed, nil
+}
+
+func (service *Service) Fail(
+	ctx context.Context,
+	workerID uuid.UUID,
+	jobID uuid.UUID,
+	leaseToken uuid.UUID,
+	reason string,
+) (job.Job, error) {
+	reason = strings.TrimSpace(reason)
+	switch {
+	case reason == "":
+		return job.Job{}, fmt.Errorf("%w: error is required", job.ErrInvalidOutcome)
+	case len(reason) > maxFailureReasonLength:
+		return job.Job{}, fmt.Errorf("%w: error cannot exceed %d characters", job.ErrInvalidOutcome, maxFailureReasonLength)
+	}
+
+	now := service.now().UTC()
+	if _, err := service.workers.Heartbeat(ctx, workerID, now); err != nil {
+		return job.Job{}, err
+	}
+	stored, err := service.jobs.Get(ctx, jobID)
+	if err != nil {
+		return job.Job{}, err
+	}
+
+	failed, err := service.jobs.Fail(ctx, job.FailParams{
+		JobID:      jobID,
+		WorkerID:   workerID,
+		LeaseToken: leaseToken,
+		Reason:     reason,
+		Now:        now,
+		RetryAt:    now.Add(service.retryDelay(stored.AttemptCount)),
+	})
+	if err != nil {
+		return job.Job{}, err
+	}
+	return failed, nil
+}
+
+func (service *Service) retryDelay(attempt int) time.Duration {
+	delay := service.retryBase
+	for current := 1; current < attempt && delay < service.retryMaximum; current++ {
+		if delay > service.retryMaximum/2 {
+			return service.retryMaximum
+		}
+		delay *= 2
+	}
+	if delay > service.retryMaximum {
+		return service.retryMaximum
+	}
+	return delay
 }
