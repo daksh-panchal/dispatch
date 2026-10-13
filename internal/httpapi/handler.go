@@ -44,6 +44,8 @@ func New(jobs *job.Service, workers *worker.Service, pinger Pinger, logger *slog
 	mux.HandleFunc("POST /api/v1/workers/{workerId}/heartbeat", handler.heartbeatWorker)
 	mux.HandleFunc("POST /api/v1/workers/{workerId}/claims", handler.claimJob)
 	mux.HandleFunc("POST /api/v1/workers/{workerId}/jobs/{jobId}/lease", handler.renewLease)
+	mux.HandleFunc("POST /api/v1/workers/{workerId}/jobs/{jobId}/complete", handler.completeJob)
+	mux.HandleFunc("POST /api/v1/workers/{workerId}/jobs/{jobId}/fail", handler.failJob)
 	return handler.recoverPanics(mux) // Request fails with 500 Internal Server Error if panic
 }
 
@@ -65,6 +67,9 @@ type jobResponse struct {
 	AvailableAt     time.Time       `json:"availableAt"`
 	WorkerID        *uuid.UUID      `json:"workerId,omitempty"`
 	LeaseExpiresAt  *time.Time      `json:"leaseExpiresAt,omitempty"`
+	Result          json.RawMessage `json:"result,omitempty"`
+	LastError       *string         `json:"lastError,omitempty"`
+	FinishedAt      *time.Time      `json:"finishedAt,omitempty"`
 	CreatedAt       time.Time       `json:"createdAt"`
 	UpdatedAt       time.Time       `json:"updatedAt"`
 }
@@ -90,6 +95,16 @@ type claimResponse struct {
 
 type renewLeaseRequest struct {
 	LeaseToken uuid.UUID `json:"leaseToken"`
+}
+
+type completeJobRequest struct {
+	LeaseToken uuid.UUID       `json:"leaseToken"`
+	Result     json.RawMessage `json:"result"`
+}
+
+type failJobRequest struct {
+	LeaseToken uuid.UUID `json:"leaseToken"`
+	Error      string    `json:"error"`
 }
 
 type problem struct {
@@ -264,6 +279,58 @@ func (handler *Handler) renewLease(writer http.ResponseWriter, request *http.Req
 	}
 }
 
+func (handler *Handler) completeJob(writer http.ResponseWriter, request *http.Request) {
+	workerID, jobID, ok := handler.parseWorkerAndJobIDs(writer, request)
+	if !ok {
+		return
+	}
+
+	var body completeJobRequest
+	if err := decodeJSON(writer, request, &body); err != nil || body.LeaseToken == uuid.Nil {
+		detail := "leaseToken must be a UUID"
+		if err != nil {
+			detail = err.Error()
+		}
+		handler.writeProblem(writer, http.StatusBadRequest, "Invalid completion", detail)
+		return
+	}
+
+	completed, err := handler.workers.Complete(
+		request.Context(),
+		workerID,
+		jobID,
+		body.LeaseToken,
+		body.Result,
+	)
+	handler.writeOutcome(writer, "complete job", workerID, jobID, completed, err)
+}
+
+func (handler *Handler) failJob(writer http.ResponseWriter, request *http.Request) {
+	workerID, jobID, ok := handler.parseWorkerAndJobIDs(writer, request)
+	if !ok {
+		return
+	}
+
+	var body failJobRequest
+	if err := decodeJSON(writer, request, &body); err != nil || body.LeaseToken == uuid.Nil {
+		detail := "leaseToken must be a UUID"
+		if err != nil {
+			detail = err.Error()
+		}
+		handler.writeProblem(writer, http.StatusBadRequest, "Invalid failure", detail)
+		return
+	}
+
+	failed, err := handler.workers.Fail(
+		request.Context(),
+		workerID,
+		jobID,
+		body.LeaseToken,
+		body.Error,
+	)
+	handler.writeOutcome(writer, "fail job", workerID, jobID, failed, err)
+}
+
 func (handler *Handler) live(writer http.ResponseWriter, _ *http.Request) { // Confirm HTTP app running
 	writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	writer.WriteHeader(http.StatusOK)
@@ -326,8 +393,51 @@ func responseFromJob(stored job.Job) jobResponse {
 		AvailableAt:     stored.AvailableAt,
 		WorkerID:        stored.WorkerID,
 		LeaseExpiresAt:  stored.LeaseExpiresAt,
+		Result:          stored.Result,
+		LastError:       stored.LastError,
+		FinishedAt:      stored.FinishedAt,
 		CreatedAt:       stored.CreatedAt,
 		UpdatedAt:       stored.UpdatedAt,
+	}
+}
+
+func (handler *Handler) parseWorkerAndJobIDs(
+	writer http.ResponseWriter,
+	request *http.Request,
+) (uuid.UUID, uuid.UUID, bool) {
+	workerID, ok := handler.parsePathUUID(writer, request, "workerId", "worker ID")
+	if !ok {
+		return uuid.Nil, uuid.Nil, false
+	}
+	jobID, ok := handler.parsePathUUID(writer, request, "jobId", "job ID")
+	if !ok {
+		return uuid.Nil, uuid.Nil, false
+	}
+	return workerID, jobID, true
+}
+
+func (handler *Handler) writeOutcome(
+	writer http.ResponseWriter,
+	operation string,
+	workerID uuid.UUID,
+	jobID uuid.UUID,
+	stored job.Job,
+	err error,
+) {
+	switch {
+	case errors.Is(err, worker.ErrNotFound):
+		handler.writeProblem(writer, http.StatusNotFound, "Worker not found", "")
+	case errors.Is(err, job.ErrNotFound):
+		handler.writeProblem(writer, http.StatusNotFound, "Job not found", "")
+	case errors.Is(err, job.ErrInvalidOutcome):
+		handler.writeProblem(writer, http.StatusBadRequest, "Invalid job outcome", err.Error())
+	case errors.Is(err, job.ErrLeaseLost):
+		handler.writeProblem(writer, http.StatusConflict, "Lease lost", err.Error())
+	case err != nil:
+		handler.logger.Error(operation, "worker_id", workerID, "job_id", jobID, "error", err)
+		handler.writeProblem(writer, http.StatusInternalServerError, "Internal server error", "")
+	default:
+		handler.writeJSON(writer, http.StatusOK, responseFromJob(stored))
 	}
 }
 

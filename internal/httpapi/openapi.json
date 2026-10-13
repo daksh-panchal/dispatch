@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "work-flow API",
-    "version": "2.0.0"
+    "version": "3.0.0"
   },
   "paths": {
     "/health/live": {
@@ -89,6 +89,40 @@
           "409": { "description": "Lease is expired or no longer owned by this worker" }
         }
       }
+    },
+    "/api/v1/workers/{workerId}/jobs/{jobId}/complete": {
+      "post": {
+        "parameters": [
+          { "name": "workerId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "jobId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CompleteJob" } } }
+        },
+        "responses": {
+          "200": { "description": "Job completed successfully" },
+          "404": { "description": "Worker or job not found" },
+          "409": { "description": "Lease is expired or no longer owned by this worker" }
+        }
+      }
+    },
+    "/api/v1/workers/{workerId}/jobs/{jobId}/fail": {
+      "post": {
+        "parameters": [
+          { "name": "workerId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "jobId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FailJob" } } }
+        },
+        "responses": {
+          "200": { "description": "Failure recorded; job was scheduled for retry or permanently failed" },
+          "404": { "description": "Worker or job not found" },
+          "409": { "description": "Lease is expired or no longer owned by this worker" }
+        }
+      }
     }
   },
   "components": {
@@ -116,6 +150,22 @@
         "required": ["leaseToken"],
         "properties": {
           "leaseToken": { "type": "string", "format": "uuid" }
+        }
+      },
+      "CompleteJob": {
+        "type": "object",
+        "required": ["leaseToken", "result"],
+        "properties": {
+          "leaseToken": { "type": "string", "format": "uuid" },
+          "result": {}
+        }
+      },
+      "FailJob": {
+        "type": "object",
+        "required": ["leaseToken", "error"],
+        "properties": {
+          "leaseToken": { "type": "string", "format": "uuid" },
+          "error": { "type": "string", "maxLength": 4000 }
         }
       }
     }

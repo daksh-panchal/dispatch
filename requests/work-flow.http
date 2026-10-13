@@ -49,3 +49,23 @@ Content-Type: application/json
 {
   "leaseToken": "{{leaseToken}}"
 }
+
+### Complete a claimed job
+POST {{baseUrl}}/api/v1/workers/{{workerId}}/jobs/{{claimedJobId}}/complete
+Content-Type: application/json
+
+{
+  "leaseToken": "{{leaseToken}}",
+  "result": {
+    "artifact": "example.zip"
+  }
+}
+
+### Report a failed attempt (retries automatically when attempts remain)
+POST {{baseUrl}}/api/v1/workers/{{workerId}}/jobs/{{claimedJobId}}/fail
+Content-Type: application/json
+
+{
+  "leaseToken": "{{leaseToken}}",
+  "error": "build command exited with status 1"
+}
