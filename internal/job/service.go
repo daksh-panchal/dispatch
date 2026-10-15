@@ -18,6 +18,7 @@ import (
 type Repository interface {
 	CreateOrGet(context.Context, Job) (stored Job, created bool, err error)
 	Get(context.Context, uuid.UUID) (Job, error)
+	Cancel(context.Context, CancelParams) (Job, error)
 }
 
 type SubmitInput struct {
@@ -85,6 +86,17 @@ func (service *Service) Get(ctx context.Context, id uuid.UUID) (Job, error) {
 		return Job{}, err
 	}
 	return stored, nil
+}
+
+func (service *Service) Cancel(ctx context.Context, id uuid.UUID) (Job, error) {
+	cancelled, err := service.repository.Cancel(ctx, CancelParams{
+		JobID: id,
+		Now:   service.now().UTC(),
+	})
+	if err != nil {
+		return Job{}, err
+	}
+	return cancelled, nil
 }
 
 func canonicalJSON(value json.RawMessage) (json.RawMessage, error) {

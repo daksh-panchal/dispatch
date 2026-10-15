@@ -16,7 +16,7 @@ import (
 const jobColumns = `
 	id, idempotency_key, submission_hash, queue, priority, payload, state,
 	attempt_count, maximum_attempts, available_at, worker_id, lease_token,
-	lease_expires_at, result, last_error, finished_at, created_at, updated_at`
+	lease_expires_at, result, last_error, finished_at, cancelled_at, created_at, updated_at`
 
 type JobRepository struct {
 	pool *pgxpool.Pool
@@ -242,6 +242,43 @@ func (repository *JobRepository) Fail(
 	return stored, nil
 }
 
+func (repository *JobRepository) Cancel(
+	ctx context.Context,
+	params job.CancelParams,
+) (job.Job, error) {
+	stored, err := scanJob(repository.pool.QueryRow(ctx, `
+		UPDATE jobs
+		SET state = 'cancelled',
+			worker_id = NULL,
+			lease_token = NULL,
+			lease_expires_at = NULL,
+			result = NULL,
+			finished_at = $1,
+			cancelled_at = $1,
+			updated_at = $1
+		WHERE id = $2
+		  AND state IN ('queued', 'running')
+		RETURNING `+jobColumns,
+		params.Now,
+		params.JobID.String(),
+	))
+	if err == nil {
+		return stored, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return job.Job{}, fmt.Errorf("cancel job: %w", err)
+	}
+
+	stored, err = repository.Get(ctx, params.JobID)
+	if err != nil {
+		return job.Job{}, err
+	}
+	if stored.State == job.StateCancelled {
+		return stored, nil
+	}
+	return job.Job{}, job.ErrCancellationConflict
+}
+
 func (repository *JobRepository) RecoverExpired(
 	ctx context.Context,
 	now time.Time,
@@ -310,6 +347,7 @@ func qualifiedJobColumns(table string) string {
 		` + table + `.attempt_count, ` + table + `.maximum_attempts, ` + table + `.available_at,
 		` + table + `.worker_id, ` + table + `.lease_token, ` + table + `.lease_expires_at,
 		` + table + `.result, ` + table + `.last_error, ` + table + `.finished_at,
+		` + table + `.cancelled_at,
 		` + table + `.created_at, ` + table + `.updated_at`
 }
 
@@ -323,6 +361,7 @@ func scanJob(row pgx.Row) (job.Job, error) {
 	var result []byte
 	var lastError pgtype.Text
 	var finishedAt pgtype.Timestamptz
+	var cancelledAt pgtype.Timestamptz
 
 	err := row.Scan(
 		&id,
@@ -341,6 +380,7 @@ func scanJob(row pgx.Row) (job.Job, error) {
 		&result,
 		&lastError,
 		&finishedAt,
+		&cancelledAt,
 		&stored.CreatedAt,
 		&stored.UpdatedAt,
 	)
@@ -375,6 +415,10 @@ func scanJob(row pgx.Row) (job.Job, error) {
 	if finishedAt.Valid {
 		value := finishedAt.Time
 		stored.FinishedAt = &value
+	}
+	if cancelledAt.Valid {
+		value := cancelledAt.Time
+		stored.CancelledAt = &value
 	}
 	return stored, nil
 }

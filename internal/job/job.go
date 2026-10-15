@@ -25,14 +25,16 @@ const (
 	StateRunning   State = "running"
 	StateSucceeded State = "succeeded"
 	StateFailed    State = "failed"
+	StateCancelled State = "cancelled"
 )
 
 var (
-	ErrNotFound            = errors.New("job not found")
-	ErrIdempotencyConflict = errors.New("idempotency key is already used by a different submission")
-	ErrInvalidSubmission   = errors.New("invalid job submission")
-	ErrLeaseLost           = errors.New("job lease is no longer owned by this worker")
-	ErrInvalidOutcome      = errors.New("invalid job outcome")
+	ErrNotFound             = errors.New("job not found")
+	ErrIdempotencyConflict  = errors.New("idempotency key is already used by a different submission")
+	ErrInvalidSubmission    = errors.New("invalid job submission")
+	ErrLeaseLost            = errors.New("job lease is no longer owned by this worker")
+	ErrInvalidOutcome       = errors.New("invalid job outcome")
+	ErrCancellationConflict = errors.New("job has already reached a terminal state")
 )
 
 type Job struct {
@@ -52,6 +54,7 @@ type Job struct {
 	Result          json.RawMessage
 	LastError       *string
 	FinishedAt      *time.Time
+	CancelledAt     *time.Time
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 }
@@ -87,6 +90,11 @@ type FailParams struct {
 	Reason     string
 	Now        time.Time
 	RetryAt    time.Time
+}
+
+type CancelParams struct {
+	JobID uuid.UUID
+	Now   time.Time
 }
 
 type RecoveryResult struct {

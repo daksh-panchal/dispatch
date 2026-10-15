@@ -110,6 +110,21 @@ func TestSubmitRejectsIdempotencyConflict(t *testing.T) {
 	}
 }
 
+func TestCancelUsesCurrentTime(t *testing.T) {
+	repository := newMemoryRepository()
+	service := NewService(repository, func() time.Time { return fixedTime })
+	id := uuid.New()
+	repository.byID[id] = Job{ID: id, State: StateQueued}
+
+	cancelled, err := service.Cancel(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Cancel() error = %v", err)
+	}
+	if cancelled.State != StateCancelled || cancelled.CancelledAt == nil || *cancelled.CancelledAt != fixedTime {
+		t.Fatalf("Cancel() job = %+v", cancelled)
+	}
+}
+
 func validParams() NewJobParams {
 	return NewJobParams{
 		IdempotencyKey:  "build-123",
@@ -163,6 +178,28 @@ func (repository *memoryRepository) Get(_ context.Context, id uuid.UUID) (Job, e
 	stored, exists := repository.byID[id]
 	if !exists {
 		return Job{}, ErrNotFound
+	}
+	return stored, nil
+}
+
+func (repository *memoryRepository) Cancel(_ context.Context, params CancelParams) (Job, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+
+	stored, exists := repository.byID[params.JobID]
+	if !exists {
+		return Job{}, ErrNotFound
+	}
+	if stored.State != StateQueued && stored.State != StateRunning && stored.State != StateCancelled {
+		return Job{}, ErrCancellationConflict
+	}
+	if stored.State != StateCancelled {
+		cancelledAt := params.Now
+		stored.State = StateCancelled
+		stored.CancelledAt = &cancelledAt
+		stored.FinishedAt = &cancelledAt
+		stored.UpdatedAt = params.Now
+		repository.byID[params.JobID] = stored
 	}
 	return stored, nil
 }
