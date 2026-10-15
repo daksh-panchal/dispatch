@@ -27,6 +27,9 @@ Idempotency-Key: example-build-005
 ### Retrieve a job
 GET {{baseUrl}}/api/v1/jobs/{{jobId}}
 
+### Cancel a queued or running job
+POST {{baseUrl}}/api/v1/jobs/{{jobId}}/cancel
+
 ### Register a worker
 POST {{baseUrl}}/api/v1/workers
 Content-Type: application/json

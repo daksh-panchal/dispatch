@@ -40,6 +40,7 @@ func New(jobs *job.Service, workers *worker.Service, pinger Pinger, logger *slog
 	mux.HandleFunc("GET /openapi/v1.json", handler.openAPI)
 	mux.HandleFunc("POST /api/v1/jobs", handler.submitJob)
 	mux.HandleFunc("GET /api/v1/jobs/{id}", handler.getJob)
+	mux.HandleFunc("POST /api/v1/jobs/{id}/cancel", handler.cancelJob)
 	mux.HandleFunc("POST /api/v1/workers", handler.registerWorker)
 	mux.HandleFunc("POST /api/v1/workers/{workerId}/heartbeat", handler.heartbeatWorker)
 	mux.HandleFunc("POST /api/v1/workers/{workerId}/claims", handler.claimJob)
@@ -70,6 +71,7 @@ type jobResponse struct {
 	Result          json.RawMessage `json:"result,omitempty"`
 	LastError       *string         `json:"lastError,omitempty"`
 	FinishedAt      *time.Time      `json:"finishedAt,omitempty"`
+	CancelledAt     *time.Time      `json:"cancelledAt,omitempty"`
 	CreatedAt       time.Time       `json:"createdAt"`
 	UpdatedAt       time.Time       `json:"updatedAt"`
 }
@@ -171,6 +173,27 @@ func (handler *Handler) getJob(writer http.ResponseWriter, request *http.Request
 	}
 	// Write JSON response with job details and 200 OK status if job successfully retrieved
 	handler.writeJSON(writer, http.StatusOK, responseFromJob(stored))
+}
+
+func (handler *Handler) cancelJob(writer http.ResponseWriter, request *http.Request) {
+	id, err := uuid.Parse(request.PathValue("id"))
+	if err != nil {
+		handler.writeProblem(writer, http.StatusBadRequest, "Invalid job ID", "job ID must be a UUID")
+		return
+	}
+
+	cancelled, err := handler.jobs.Cancel(request.Context(), id)
+	switch {
+	case errors.Is(err, job.ErrNotFound):
+		handler.writeProblem(writer, http.StatusNotFound, "Job not found", "")
+	case errors.Is(err, job.ErrCancellationConflict):
+		handler.writeProblem(writer, http.StatusConflict, "Cancellation conflict", err.Error())
+	case err != nil:
+		handler.logger.Error("cancel job", "job_id", id, "error", err)
+		handler.writeProblem(writer, http.StatusInternalServerError, "Internal server error", "")
+	default:
+		handler.writeJSON(writer, http.StatusOK, responseFromJob(cancelled))
+	}
 }
 
 func (handler *Handler) registerWorker(writer http.ResponseWriter, request *http.Request) {
@@ -396,6 +419,7 @@ func responseFromJob(stored job.Job) jobResponse {
 		Result:          stored.Result,
 		LastError:       stored.LastError,
 		FinishedAt:      stored.FinishedAt,
+		CancelledAt:     stored.CancelledAt,
 		CreatedAt:       stored.CreatedAt,
 		UpdatedAt:       stored.UpdatedAt,
 	}

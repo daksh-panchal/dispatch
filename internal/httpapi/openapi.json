@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "work-flow API",
-    "version": "3.0.0"
+    "version": "4.0.0"
   },
   "paths": {
     "/health/live": {
@@ -35,6 +35,18 @@
         "responses": {
           "200": { "description": "Job found" },
           "404": { "description": "Job not found" }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/cancel": {
+      "post": {
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Job cancelled, or previously cancelled job returned" },
+          "404": { "description": "Job not found" },
+          "409": { "description": "Job already succeeded or failed" }
         }
       }
     },
