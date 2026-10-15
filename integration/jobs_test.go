@@ -362,6 +362,103 @@ func TestJobAPIAgainstPostgreSQL(t *testing.T) {
 		}
 	})
 
+	t.Run("queued cancellation is idempotent and prevents claims", func(t *testing.T) {
+		queue := "cancel-queued-" + uuid.NewString()
+		created := submitJobWithOptions(t, server.URL, "integration-"+uuid.NewString(), queue, "cancel", 0, http.StatusCreated)
+
+		status, cancelled, err := cancelJobResult(server.URL, created.ID)
+		if err != nil {
+			t.Fatalf("cancel queued job: %v", err)
+		}
+		if status != http.StatusOK || cancelled.State != "cancelled" || cancelled.CancelledAt == nil || cancelled.FinishedAt == nil {
+			t.Fatalf("cancel status = %d, job = %+v", status, cancelled)
+		}
+
+		status, repeated, err := cancelJobResult(server.URL, created.ID)
+		if err != nil {
+			t.Fatalf("repeat cancellation: %v", err)
+		}
+		if status != http.StatusOK || repeated.CancelledAt == nil || !repeated.CancelledAt.Equal(*cancelled.CancelledAt) {
+			t.Fatalf("repeat cancellation status = %d, job = %+v", status, repeated)
+		}
+
+		registered := registerWorker(t, server.URL, "cancel-queued-worker", queue)
+		status, _, err = claimJobResult(server.URL, registered.ID)
+		if err != nil || status != http.StatusNoContent {
+			t.Fatalf("claim cancelled job status = %d, error = %v", status, err)
+		}
+	})
+
+	t.Run("running cancellation invalidates the worker lease", func(t *testing.T) {
+		queue := "cancel-running-" + uuid.NewString()
+		_ = submitJobWithOptions(t, server.URL, "integration-"+uuid.NewString(), queue, "cancel", 0, http.StatusCreated)
+		registered := registerWorker(t, server.URL, "cancel-running-worker", queue)
+		status, claim, err := claimJobResult(server.URL, registered.ID)
+		if err != nil || status != http.StatusOK {
+			t.Fatalf("claim status = %d, error = %v", status, err)
+		}
+
+		status, cancelled, err := cancelJobResult(server.URL, claim.Job.ID)
+		if err != nil {
+			t.Fatalf("cancel running job: %v", err)
+		}
+		if status != http.StatusOK || cancelled.State != "cancelled" || cancelled.WorkerID != nil || cancelled.LeaseExpiresAt != nil {
+			t.Fatalf("cancel status = %d, job = %+v", status, cancelled)
+		}
+
+		status, _, err = renewLeaseResult(server.URL, registered.ID, claim.Job.ID, claim.LeaseToken)
+		if err != nil || status != http.StatusConflict {
+			t.Fatalf("renew cancelled job status = %d, error = %v", status, err)
+		}
+		status, _, err = completeJobResult(server.URL, registered.ID, claim.Job.ID, claim.LeaseToken, nil)
+		if err != nil || status != http.StatusConflict {
+			t.Fatalf("complete cancelled job status = %d, error = %v", status, err)
+		}
+	})
+
+	t.Run("cancellation and completion have exactly one winner", func(t *testing.T) {
+		queue := "cancel-race-" + uuid.NewString()
+		_ = submitJobWithOptions(t, server.URL, "integration-"+uuid.NewString(), queue, "race", 0, http.StatusCreated)
+		registered := registerWorker(t, server.URL, "cancel-race-worker", queue)
+		status, claim, err := claimJobResult(server.URL, registered.ID)
+		if err != nil || status != http.StatusOK {
+			t.Fatalf("claim status = %d, error = %v", status, err)
+		}
+
+		type result struct {
+			action string
+			status int
+			err    error
+		}
+		results := make(chan result, 2)
+		go func() {
+			status, _, err := cancelJobResult(server.URL, claim.Job.ID)
+			results <- result{action: "cancel", status: status, err: err}
+		}()
+		go func() {
+			status, _, err := completeJobResult(server.URL, registered.ID, claim.Job.ID, claim.LeaseToken, nil)
+			results <- result{action: "complete", status: status, err: err}
+		}()
+
+		statuses := make(map[string]int, 2)
+		for range 2 {
+			result := <-results
+			if result.err != nil {
+				t.Fatalf("%s race request: %v", result.action, result.err)
+			}
+			statuses[result.action] = result.status
+		}
+		if !((statuses["cancel"] == http.StatusOK && statuses["complete"] == http.StatusConflict) ||
+			(statuses["complete"] == http.StatusOK && statuses["cancel"] == http.StatusConflict)) {
+			t.Fatalf("race statuses = %+v, want one 200 and one 409", statuses)
+		}
+
+		stored := getJob(t, server.URL, claim.Job.ID)
+		if stored.State != "cancelled" && stored.State != "succeeded" {
+			t.Fatalf("race winner left job in state %q", stored.State)
+		}
+	})
+
 	t.Run("expired lease is recovered once and stale worker is fenced", func(t *testing.T) {
 		queue := "recovery-" + uuid.NewString()
 		_ = submitJobWithPolicy(t, server.URL, "integration-"+uuid.NewString(), queue, "recover", 0, 2, http.StatusCreated)
@@ -454,6 +551,7 @@ type apiJob struct {
 	Result         json.RawMessage `json:"result"`
 	LastError      *string         `json:"lastError"`
 	FinishedAt     *time.Time      `json:"finishedAt"`
+	CancelledAt    *time.Time      `json:"cancelledAt"`
 }
 
 type apiWorker struct {
@@ -593,6 +691,26 @@ func claimJobResult(baseURL string, workerID uuid.UUID) (int, apiClaim, error) {
 		}
 	}
 	return response.StatusCode, claim, nil
+}
+
+func cancelJobResult(baseURL string, jobID uuid.UUID) (int, apiJob, error) {
+	request, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/jobs/"+jobID.String()+"/cancel", nil)
+	if err != nil {
+		return 0, apiJob{}, err
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return 0, apiJob{}, err
+	}
+	defer response.Body.Close()
+
+	var stored apiJob
+	if response.StatusCode == http.StatusOK {
+		if err := json.NewDecoder(response.Body).Decode(&stored); err != nil {
+			return response.StatusCode, apiJob{}, err
+		}
+	}
+	return response.StatusCode, stored, nil
 }
 
 func renewLease(t *testing.T, baseURL string, workerID, jobID, leaseToken uuid.UUID) apiJob {

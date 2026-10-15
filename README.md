@@ -4,8 +4,9 @@
 accepts jobs, persists their state, and coordinates workers that claim them for
 execution.
 
-Milestone 3 adds durable outcomes, automatic retries, expired-lease recovery,
-and fencing that prevents a stale worker from changing a reassigned job.
+Milestone 4 adds cancellation and atomic lifecycle races. Queued and running
+jobs can be cancelled without allowing a worker's late result to overwrite the
+terminal state.
 
 ## Structure
 
@@ -30,6 +31,8 @@ rules separate from HTTP and PostgreSQL without introducing separate services.
   `200 OK`.
 - Reusing a key with different request contents returns `409 Conflict`.
 - `GET /api/v1/jobs/{id}` returns persisted state or `404 Not Found`.
+- `POST /api/v1/jobs/{id}/cancel` moves a queued or running job to `cancelled`,
+  clears any active lease, and returns the existing job when repeated.
 - PostgreSQL's unique constraint provides the final concurrency guarantee for
   idempotent submission.
 - `POST /api/v1/workers` registers a worker for one queue.
@@ -50,6 +53,9 @@ rules separate from HTTP and PostgreSQL without introducing separate services.
   requeues the job or permanently fails it when no attempts remain.
 - Completion, failure, and renewal require the current worker ID, lease token,
   and an unexpired lease. A stale worker receives `409 Conflict`.
+- Cancellation, completion, and failure use conditional PostgreSQL updates, so
+  concurrent terminal transitions have exactly one winner. Cancelling a job
+  that already succeeded or failed returns `409 Conflict`.
 - PostgreSQL row locking with `FOR UPDATE SKIP LOCKED` prevents concurrent workers
   from claiming or recovering the same job.
 
@@ -84,6 +90,7 @@ GET  /health/ready
 GET  /openapi/v1.json
 POST /api/v1/jobs
 GET  /api/v1/jobs/{id}
+POST /api/v1/jobs/{id}/cancel
 POST /api/v1/workers
 POST /api/v1/workers/{workerId}/heartbeat
 POST /api/v1/workers/{workerId}/claims
@@ -122,5 +129,5 @@ controls and authentication.
 
 ## Later milestones
 
-- Job cancellation and cancellation races
-- OpenTelemetry and production hardening
+- Durable scheduler events and Message-Flow integration
+- OpenTelemetry observability and operational hardening
