@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/daksh-panchal/work-flow/internal/httpapi"
 	"github.com/daksh-panchal/work-flow/internal/job"
+	"github.com/daksh-panchal/work-flow/internal/outbox"
 	workflowpostgres "github.com/daksh-panchal/work-flow/internal/postgres"
 	"github.com/daksh-panchal/work-flow/internal/recovery"
 	"github.com/daksh-panchal/work-flow/internal/worker"
@@ -167,6 +169,7 @@ func TestJobAPIAgainstPostgreSQL(t *testing.T) {
 		if createdCount != 1 {
 			t.Fatalf("created responses = %d, want 1", createdCount)
 		}
+		assertEventTypes(t, pool, expectedID, []outbox.EventType{outbox.EventJobSubmitted})
 	})
 
 	t.Run("worker registers and heartbeats", func(t *testing.T) {
@@ -360,6 +363,13 @@ func TestJobAPIAgainstPostgreSQL(t *testing.T) {
 		if status != http.StatusOK || terminal.State != "failed" || terminal.AttemptCount != 2 || terminal.FinishedAt == nil {
 			t.Fatalf("terminal status = %d, job = %+v", status, terminal)
 		}
+		assertEventTypes(t, pool, terminal.ID, []outbox.EventType{
+			outbox.EventJobSubmitted,
+			outbox.EventJobClaimed,
+			outbox.EventJobRetryScheduled,
+			outbox.EventJobClaimed,
+			outbox.EventJobFailed,
+		})
 	})
 
 	t.Run("queued cancellation is idempotent and prevents claims", func(t *testing.T) {
@@ -387,6 +397,10 @@ func TestJobAPIAgainstPostgreSQL(t *testing.T) {
 		if err != nil || status != http.StatusNoContent {
 			t.Fatalf("claim cancelled job status = %d, error = %v", status, err)
 		}
+		assertEventTypes(t, pool, created.ID, []outbox.EventType{
+			outbox.EventJobSubmitted,
+			outbox.EventJobCancelled,
+		})
 	})
 
 	t.Run("running cancellation invalidates the worker lease", func(t *testing.T) {
@@ -535,6 +549,177 @@ func TestJobAPIAgainstPostgreSQL(t *testing.T) {
 		)
 		if err != nil || status != http.StatusOK || completed.State != "succeeded" {
 			t.Fatalf("replacement completion status = %d, job = %+v, error = %v", status, completed, err)
+		}
+		assertEventTypes(t, pool, completed.ID, []outbox.EventType{
+			outbox.EventJobSubmitted,
+			outbox.EventJobClaimed,
+			outbox.EventJobRecovered,
+			outbox.EventJobClaimed,
+			outbox.EventJobSucceeded,
+		})
+	})
+
+	t.Run("concurrent outbox publishers claim each event once", func(t *testing.T) {
+		_ = submitJob(t, server.URL, "integration-"+uuid.NewString(), "publish-one", http.StatusCreated)
+		_ = submitJob(t, server.URL, "integration-"+uuid.NewString(), "publish-two", http.StatusCreated)
+
+		outboxRepository := workflowpostgres.NewOutboxRepository(pool)
+		now := time.Now().UTC()
+		var expected int
+		if err := pool.QueryRow(ctx, `
+			SELECT COUNT(*)
+			FROM job_outbox_events
+			WHERE published_at IS NULL
+			  AND next_attempt_at <= $1
+			  AND (claim_expires_at IS NULL OR claim_expires_at <= $1)`, now).Scan(&expected); err != nil {
+			t.Fatalf("count pending events: %v", err)
+		}
+
+		type claimResult struct {
+			token  uuid.UUID
+			events []outbox.Event
+			err    error
+		}
+		results := make(chan claimResult, 2)
+		for range 2 {
+			go func() {
+				token := uuid.New()
+				events, err := outboxRepository.ClaimBatch(ctx, outbox.ClaimParams{
+					Token:     token,
+					Now:       now,
+					ExpiresAt: now.Add(time.Minute),
+					BatchSize: 1000,
+				})
+				results <- claimResult{token: token, events: events, err: err}
+			}()
+		}
+
+		claimed := make(map[uuid.UUID]uuid.UUID, expected)
+		for range 2 {
+			result := <-results
+			if result.err != nil {
+				t.Fatalf("claim outbox events: %v", result.err)
+			}
+			for _, event := range result.events {
+				if _, exists := claimed[event.ID]; exists {
+					t.Fatalf("event %s was claimed by two publishers", event.ID)
+				}
+				claimed[event.ID] = result.token
+			}
+		}
+		if len(claimed) != expected {
+			t.Fatalf("claimed events = %d, want %d", len(claimed), expected)
+		}
+
+		var publishedID uuid.UUID
+		var publishedToken uuid.UUID
+		for eventID, token := range claimed {
+			publishedID = eventID
+			publishedToken = token
+			break
+		}
+		if publishedID == uuid.Nil {
+			t.Fatal("no event was available to verify publication")
+		}
+		if err := outboxRepository.MarkPublished(ctx, publishedID, uuid.New(), now); !errors.Is(err, outbox.ErrClaimLost) {
+			t.Fatalf("wrong-token publication error = %v, want ErrClaimLost", err)
+		}
+		if err := outboxRepository.MarkPublished(ctx, publishedID, publishedToken, now); err != nil {
+			t.Fatalf("mark event published: %v", err)
+		}
+		var attempts int
+		var publishedAt *time.Time
+		if err := pool.QueryRow(ctx, `
+			SELECT publish_attempts, published_at
+			FROM job_outbox_events
+			WHERE id = $1`, publishedID).Scan(&attempts, &publishedAt); err != nil {
+			t.Fatalf("read published event: %v", err)
+		}
+		if attempts != 1 || publishedAt == nil {
+			t.Fatalf("published attempts = %d, published at = %v", attempts, publishedAt)
+		}
+
+		var failedID uuid.UUID
+		var failedToken uuid.UUID
+		for eventID, token := range claimed {
+			if eventID != publishedID {
+				failedID = eventID
+				failedToken = token
+				break
+			}
+		}
+		if failedID == uuid.Nil {
+			t.Fatal("no second event was available to verify publish failure")
+		}
+		nextAttemptAt := now.Add(time.Minute)
+		if err := outboxRepository.MarkFailed(ctx, outbox.PublishFailure{
+			EventID:       failedID,
+			ClaimToken:    failedToken,
+			FailedAt:      now,
+			NextAttemptAt: nextAttemptAt,
+			Error:         "message-flow unavailable",
+		}); err != nil {
+			t.Fatalf("mark event failed: %v", err)
+		}
+		var failedAttempts int
+		var storedNextAttempt time.Time
+		var lastError string
+		var claimToken *uuid.UUID
+		if err := pool.QueryRow(ctx, `
+			SELECT publish_attempts, next_attempt_at, last_publish_error, claim_token
+			FROM job_outbox_events
+			WHERE id = $1`, failedID).Scan(
+			&failedAttempts,
+			&storedNextAttempt,
+			&lastError,
+			&claimToken,
+		); err != nil {
+			t.Fatalf("read failed event: %v", err)
+		}
+		if failedAttempts != 1 || storedNextAttempt.Sub(nextAttemptAt).Abs() > time.Microsecond || lastError != "message-flow unavailable" || claimToken != nil {
+			t.Fatalf(
+				"failed attempts = %d, next attempt = %v, error = %q, claim token = %v",
+				failedAttempts,
+				storedNextAttempt,
+				lastError,
+				claimToken,
+			)
+		}
+	})
+
+	t.Run("expired outbox claim is delivered again", func(t *testing.T) {
+		created := submitJob(t, server.URL, "integration-"+uuid.NewString(), "redeliver", http.StatusCreated)
+		outboxRepository := workflowpostgres.NewOutboxRepository(pool)
+		now := time.Now().UTC()
+		firstToken := uuid.New()
+		first, err := outboxRepository.ClaimBatch(ctx, outbox.ClaimParams{
+			Token:     firstToken,
+			Now:       now,
+			ExpiresAt: now.Add(20 * time.Millisecond),
+			BatchSize: 1,
+		})
+		if err != nil || len(first) != 1 || first[0].JobID != created.ID {
+			t.Fatalf("first claim = %+v, error = %v", first, err)
+		}
+
+		beforeExpiry, err := outboxRepository.ClaimBatch(ctx, outbox.ClaimParams{
+			Token:     uuid.New(),
+			Now:       now.Add(10 * time.Millisecond),
+			ExpiresAt: now.Add(time.Minute),
+			BatchSize: 1,
+		})
+		if err != nil || len(beforeExpiry) != 0 {
+			t.Fatalf("claim before expiry = %+v, error = %v", beforeExpiry, err)
+		}
+
+		afterExpiry, err := outboxRepository.ClaimBatch(ctx, outbox.ClaimParams{
+			Token:     uuid.New(),
+			Now:       now.Add(30 * time.Millisecond),
+			ExpiresAt: now.Add(time.Minute),
+			BatchSize: 1,
+		})
+		if err != nil || len(afterExpiry) != 1 || afterExpiry[0].ID != first[0].ID {
+			t.Fatalf("claim after expiry = %+v, error = %v", afterExpiry, err)
 		}
 	})
 }
@@ -833,6 +1018,44 @@ func waitUntil(t *testing.T, instant time.Time) {
 	t.Helper()
 	if delay := time.Until(instant); delay > 0 {
 		time.Sleep(delay)
+	}
+}
+
+func assertEventTypes(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	jobID uuid.UUID,
+	want []outbox.EventType,
+) {
+	t.Helper()
+	rows, err := pool.Query(context.Background(), `
+		SELECT event_type
+		FROM job_outbox_events
+		WHERE job_id = $1
+		ORDER BY sequence`, jobID)
+	if err != nil {
+		t.Fatalf("read job events: %v", err)
+	}
+	defer rows.Close()
+
+	var got []outbox.EventType
+	for rows.Next() {
+		var eventType outbox.EventType
+		if err := rows.Scan(&eventType); err != nil {
+			t.Fatalf("scan job event: %v", err)
+		}
+		got = append(got, eventType)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate job events: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("event types = %v, want %v", got, want)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("event types = %v, want %v", got, want)
+		}
 	}
 }
 
