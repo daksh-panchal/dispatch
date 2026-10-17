@@ -4,9 +4,9 @@
 accepts jobs, persists their state, and coordinates workers that claim them for
 execution.
 
-Milestone 4 adds cancellation and atomic lifecycle races. Queued and running
-jobs can be cancelled without allowing a worker's late result to overwrite the
-terminal state.
+Milestone 5 adds durable scheduler events. Every committed job transition is
+stored with an outbox event that can be delivered to Message-Flow without
+losing state changes during crashes or broker outages.
 
 ## Structure
 
@@ -16,6 +16,7 @@ internal/httpapi       HTTP transport
 internal/job           job model and application operations
 internal/worker        worker registration, heartbeat, and claim operations
 internal/recovery      background recovery of expired worker leases
+internal/outbox        durable event model and background publishing workflow
 internal/postgres      PostgreSQL repository and migration runner
 migrations             embedded SQL schema migrations
 integration            end-to-end tests with a real PostgreSQL container
@@ -58,6 +59,15 @@ rules separate from HTTP and PostgreSQL without introducing separate services.
   that already succeeded or failed returns `409 Conflict`.
 - PostgreSQL row locking with `FOR UPDATE SKIP LOCKED` prevents concurrent workers
   from claiming or recovering the same job.
+- Job submission, claiming, retry scheduling, recovery, completion, failure, and
+  cancellation write versioned events to `job_outbox_events` in the same
+  PostgreSQL transaction as their state change.
+- Outbox events use short-lived claim leases so multiple publisher instances can
+  work concurrently without publishing the same event at the same time.
+- Failed publications use capped exponential backoff. An expired publisher claim
+  becomes eligible again, providing at-least-once delivery after crashes.
+- Event IDs are stable across redelivery so Message-Flow consumers can safely
+  deduplicate repeated deliveries.
 
 ## Requirements
 
@@ -108,7 +118,9 @@ go test ./...
 ```
 
 Unit tests require only Go. Integration tests require Docker because they start
-and dispose of an isolated PostgreSQL container through Testcontainers.
+and dispose of an isolated PostgreSQL container through Testcontainers. The
+integration suite verifies ordered lifecycle events, concurrent outbox claims,
+claim-token enforcement, and redelivery after a publisher claim expires.
 
 ## Configuration
 
@@ -129,5 +141,9 @@ controls and authentication.
 
 ## Later milestones
 
-- Durable scheduler events and Message-Flow integration
 - OpenTelemetry observability and operational hardening
+
+The outbox publisher is deliberately transport-independent. It is not started
+by the API until Message-Flow defines its publishing protocol; its adapter can
+then implement the existing `outbox.Publisher` interface without changing job
+transactions or delivery guarantees.
