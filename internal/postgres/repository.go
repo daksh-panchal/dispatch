@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/daksh-panchal/work-flow/internal/job"
+	"github.com/daksh-panchal/work-flow/internal/outbox"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -30,7 +31,13 @@ func (repository *JobRepository) CreateOrGet(
 	ctx context.Context,
 	candidate job.Job,
 ) (job.Job, bool, error) {
-	row := repository.pool.QueryRow(ctx, `
+	tx, err := repository.pool.Begin(ctx)
+	if err != nil {
+		return job.Job{}, false, fmt.Errorf("begin job submission: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+
+	row := tx.QueryRow(ctx, `
 		INSERT INTO jobs (
 			id, idempotency_key, submission_hash, queue, priority, payload, state,
 			attempt_count, maximum_attempts, available_at, created_at, updated_at
@@ -54,6 +61,9 @@ func (repository *JobRepository) CreateOrGet(
 
 	stored, err := scanJob(row)
 	if err == nil { // Job was created successfully
+		if err := commitJobEvent(ctx, tx, outbox.EventJobSubmitted, stored); err != nil {
+			return job.Job{}, false, fmt.Errorf("store submitted job event: %w", err)
+		}
 		return stored, true, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) { // If error is not "no rows", return the error
@@ -61,7 +71,7 @@ func (repository *JobRepository) CreateOrGet(
 	}
 
 	// Job with the same idempotency key already exists, retrieve it
-	stored, err = scanJob(repository.pool.QueryRow(ctx, `
+	stored, err = scanJob(tx.QueryRow(ctx, `
 		SELECT `+jobColumns+`
 		FROM jobs
 		WHERE idempotency_key = $1`,
@@ -69,6 +79,9 @@ func (repository *JobRepository) CreateOrGet(
 	))
 	if err != nil {
 		return job.Job{}, false, fmt.Errorf("read idempotent job: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return job.Job{}, false, fmt.Errorf("commit idempotent job read: %w", err)
 	}
 	return stored, false, nil // Return the existing job and indicate it was not created
 }
@@ -94,7 +107,13 @@ func (repository *JobRepository) Claim(
 	ctx context.Context,
 	params job.ClaimParams,
 ) (job.Job, bool, error) {
-	stored, err := scanJob(repository.pool.QueryRow(ctx, `
+	tx, err := repository.pool.Begin(ctx)
+	if err != nil {
+		return job.Job{}, false, fmt.Errorf("begin job claim: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+
+	stored, err := scanJob(tx.QueryRow(ctx, `
 		WITH candidate AS (
 			SELECT id
 			FROM jobs
@@ -128,6 +147,9 @@ func (repository *JobRepository) Claim(
 	}
 	if err != nil {
 		return job.Job{}, false, fmt.Errorf("claim job: %w", err)
+	}
+	if err := commitJobEvent(ctx, tx, outbox.EventJobClaimed, stored); err != nil {
+		return job.Job{}, false, fmt.Errorf("store claimed job event: %w", err)
 	}
 	return stored, true, nil
 }
@@ -165,7 +187,13 @@ func (repository *JobRepository) Complete(
 	ctx context.Context,
 	params job.CompleteParams,
 ) (job.Job, error) {
-	stored, err := scanJob(repository.pool.QueryRow(ctx, `
+	tx, err := repository.pool.Begin(ctx)
+	if err != nil {
+		return job.Job{}, fmt.Errorf("begin job completion: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+
+	stored, err := scanJob(tx.QueryRow(ctx, `
 		UPDATE jobs
 		SET state = 'succeeded',
 			worker_id = NULL,
@@ -193,6 +221,9 @@ func (repository *JobRepository) Complete(
 	if err != nil {
 		return job.Job{}, fmt.Errorf("complete job: %w", err)
 	}
+	if err := commitJobEvent(ctx, tx, outbox.EventJobSucceeded, stored); err != nil {
+		return job.Job{}, fmt.Errorf("store succeeded job event: %w", err)
+	}
 	return stored, nil
 }
 
@@ -200,7 +231,13 @@ func (repository *JobRepository) Fail(
 	ctx context.Context,
 	params job.FailParams,
 ) (job.Job, error) {
-	stored, err := scanJob(repository.pool.QueryRow(ctx, `
+	tx, err := repository.pool.Begin(ctx)
+	if err != nil {
+		return job.Job{}, fmt.Errorf("begin job failure: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+
+	stored, err := scanJob(tx.QueryRow(ctx, `
 		UPDATE jobs
 		SET state = CASE
 				WHEN attempt_count < maximum_attempts THEN 'queued'
@@ -239,6 +276,13 @@ func (repository *JobRepository) Fail(
 	if err != nil {
 		return job.Job{}, fmt.Errorf("fail job: %w", err)
 	}
+	eventType := outbox.EventJobFailed
+	if stored.State == job.StateQueued {
+		eventType = outbox.EventJobRetryScheduled
+	}
+	if err := commitJobEvent(ctx, tx, eventType, stored); err != nil {
+		return job.Job{}, fmt.Errorf("store failed job event: %w", err)
+	}
 	return stored, nil
 }
 
@@ -246,7 +290,13 @@ func (repository *JobRepository) Cancel(
 	ctx context.Context,
 	params job.CancelParams,
 ) (job.Job, error) {
-	stored, err := scanJob(repository.pool.QueryRow(ctx, `
+	tx, err := repository.pool.Begin(ctx)
+	if err != nil {
+		return job.Job{}, fmt.Errorf("begin job cancellation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+
+	stored, err := scanJob(tx.QueryRow(ctx, `
 		UPDATE jobs
 		SET state = 'cancelled',
 			worker_id = NULL,
@@ -263,17 +313,31 @@ func (repository *JobRepository) Cancel(
 		params.JobID.String(),
 	))
 	if err == nil {
+		if err := commitJobEvent(ctx, tx, outbox.EventJobCancelled, stored); err != nil {
+			return job.Job{}, fmt.Errorf("store cancelled job event: %w", err)
+		}
 		return stored, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return job.Job{}, fmt.Errorf("cancel job: %w", err)
 	}
 
-	stored, err = repository.Get(ctx, params.JobID)
+	stored, err = scanJob(tx.QueryRow(ctx, `
+		SELECT `+jobColumns+`
+		FROM jobs
+		WHERE id = $1`,
+		params.JobID.String(),
+	))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return job.Job{}, job.ErrNotFound
+	}
 	if err != nil {
-		return job.Job{}, err
+		return job.Job{}, fmt.Errorf("read job after cancellation conflict: %w", err)
 	}
 	if stored.State == job.StateCancelled {
+		if err := tx.Commit(ctx); err != nil {
+			return job.Job{}, fmt.Errorf("commit repeated cancellation: %w", err)
+		}
 		return stored, nil
 	}
 	return job.Job{}, job.ErrCancellationConflict
@@ -286,8 +350,14 @@ func (repository *JobRepository) RecoverExpired(
 	retryMaximum time.Duration,
 	batchSize int,
 ) (job.RecoveryResult, error) {
+	tx, err := repository.pool.Begin(ctx)
+	if err != nil {
+		return job.RecoveryResult{}, fmt.Errorf("begin expired job recovery: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+
 	var result job.RecoveryResult
-	err := repository.pool.QueryRow(ctx, `
+	rows, err := tx.Query(ctx, `
 		WITH expired AS (
 			SELECT id
 			FROM jobs
@@ -323,19 +393,48 @@ func (repository *JobRepository) RecoverExpired(
 				updated_at = $1
 			FROM expired
 			WHERE jobs.id = expired.id
-			RETURNING jobs.state
+			RETURNING `+qualifiedJobColumns("jobs")+`
 		)
-		SELECT
-			COUNT(*) FILTER (WHERE state = 'queued'),
-			COUNT(*) FILTER (WHERE state = 'failed')
+		SELECT `+qualifiedJobColumns("recovered")+`
 		FROM recovered`,
 		now,
 		retryBase.Milliseconds(),
 		retryMaximum.Milliseconds(),
 		batchSize,
-	).Scan(&result.Requeued, &result.Failed)
+	)
 	if err != nil {
 		return job.RecoveryResult{}, fmt.Errorf("recover expired jobs: %w", err)
+	}
+
+	recovered := make([]job.Job, 0, batchSize)
+	for rows.Next() {
+		stored, err := scanJob(rows)
+		if err != nil {
+			rows.Close()
+			return job.RecoveryResult{}, fmt.Errorf("scan recovered job: %w", err)
+		}
+		recovered = append(recovered, stored)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return job.RecoveryResult{}, fmt.Errorf("read recovered jobs: %w", err)
+	}
+	rows.Close()
+
+	for _, stored := range recovered {
+		eventType := outbox.EventJobFailed
+		if stored.State == job.StateQueued {
+			result.Requeued++
+			eventType = outbox.EventJobRecovered
+		} else {
+			result.Failed++
+		}
+		if err := insertJobEvent(ctx, tx, eventType, stored); err != nil {
+			return job.RecoveryResult{}, fmt.Errorf("store recovered job event: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return job.RecoveryResult{}, fmt.Errorf("commit expired job recovery: %w", err)
 	}
 	return result, nil
 }
