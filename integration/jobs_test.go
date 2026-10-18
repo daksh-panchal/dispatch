@@ -111,6 +111,21 @@ func TestJobAPIAgainstPostgreSQL(t *testing.T) {
 		}
 	})
 
+	t.Run("scheduler statistics reflect durable state", func(t *testing.T) {
+		_ = submitJob(t, server.URL, "integration-"+uuid.NewString(), "observe", http.StatusCreated)
+		statsRepository := workflowpostgres.NewStatsRepository(pool)
+		counts, activeLeases, expiredLeases, pendingEvents, err := statsRepository.ReadSchedulerStats(ctx)
+		if err != nil {
+			t.Fatalf("read scheduler statistics: %v", err)
+		}
+		if counts["queued"] < 1 || pendingEvents < 1 {
+			t.Fatalf("scheduler statistics = %+v, pending events = %d", counts, pendingEvents)
+		}
+		if activeLeases < 0 || expiredLeases < 0 {
+			t.Fatalf("invalid lease statistics: active = %d, expired = %d", activeLeases, expiredLeases)
+		}
+	})
+
 	t.Run("repeated submission returns the original job", func(t *testing.T) {
 		key := "integration-" + uuid.NewString()
 		first := submitJob(t, server.URL, key, "build", http.StatusCreated)
