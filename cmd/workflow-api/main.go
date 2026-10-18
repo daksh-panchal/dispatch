@@ -7,59 +7,73 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/daksh-panchal/work-flow/internal/httpapi"
 	"github.com/daksh-panchal/work-flow/internal/job"
+	"github.com/daksh-panchal/work-flow/internal/observability"
 	workflowpostgres "github.com/daksh-panchal/work-flow/internal/postgres"
 	"github.com/daksh-panchal/work-flow/internal/recovery"
 	"github.com/daksh-panchal/work-flow/internal/worker"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const (
-	defaultAddress       = "127.0.0.1:5080"
-	defaultDatabaseURL   = "postgres://workflow:workflow_dev@localhost:5432/workflow?sslmode=disable"
-	defaultLeaseDuration = 30 * time.Second
-	defaultRetryBase     = 5 * time.Second
-	defaultRetryMaximum  = 5 * time.Minute
-	defaultRecoveryEvery = 2 * time.Second
-	defaultRecoveryBatch = 100
-)
-
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+	logger := slog.New(observability.NewTraceHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
-	}))
+	})))
 	if err := run(logger); err != nil {
 		logger.Error("work-flow stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(logger *slog.Logger) error {
+func run(logger *slog.Logger) (runErr error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Connection pool manages reusable connections to db
-	databaseURL := environmentOrDefault("DATABASE_URL", defaultDatabaseURL)
-	pool, err := pgxpool.New(ctx, databaseURL)
+	configured, err := loadConfig(os.LookupEnv)
+	if err != nil {
+		return err
+	}
+
+	pool, err := pgxpool.New(ctx, configured.DatabaseURL)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
 
-	if err := pool.Ping(ctx); err != nil { // Error connecting to db
+	if err := pool.Ping(ctx); err != nil {
 		return err
 	}
 
-	// Run migrations to ensure database schema is up to date
 	if err := workflowpostgres.Migrate(ctx, pool); err != nil {
 		return err
 	}
 
-	// Create the application components and start HTTP server
+	telemetry, err := observability.Setup(ctx, configured.ServiceVersion, configured.Environment)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), configured.ShutdownTimeout)
+		defer cancel()
+		runErr = errors.Join(runErr, telemetry.Shutdown(shutdownCtx))
+	}()
+	logger.Info(
+		"telemetry configured",
+		"traces_enabled", telemetry.TracesEnabled,
+		"metrics_enabled", telemetry.MetricsEnabled,
+	)
+
+	statsRepository := workflowpostgres.NewStatsRepository(pool)
+	metrics, err := observability.NewMetrics(observability.Meter(), statsRepository, logger)
+	if err != nil {
+		return err
+	}
+
 	jobRepository := workflowpostgres.NewJobRepository(pool)
 	workerRepository := workflowpostgres.NewWorkerRepository(pool)
 	jobService := job.NewService(jobRepository, time.Now)
@@ -67,24 +81,38 @@ func run(logger *slog.Logger) error {
 		workerRepository,
 		jobRepository,
 		time.Now,
-		defaultLeaseDuration,
-		defaultRetryBase,
-		defaultRetryMaximum,
+		configured.LeaseDuration,
+		configured.RetryBase,
+		configured.RetryMaximum,
 	)
 	recoveryService := recovery.NewService(
 		jobRepository,
 		time.Now,
-		defaultRecoveryEvery,
-		defaultRetryBase,
-		defaultRetryMaximum,
-		defaultRecoveryBatch,
+		configured.RecoveryInterval,
+		configured.RetryBase,
+		configured.RetryMaximum,
+		configured.RecoveryBatchSize,
 		logger,
+		metrics,
 	)
-	go recoveryService.Run(ctx)
+	backgroundCtx, cancelBackground := context.WithCancel(ctx)
+	defer cancelBackground()
+	var background sync.WaitGroup
+	background.Add(1)
+	go func() {
+		defer background.Done()
+		recoveryService.Run(backgroundCtx)
+	}()
 
 	server := &http.Server{
-		Addr:              environmentOrDefault("HTTP_ADDR", defaultAddress),
-		Handler:           httpapi.New(jobService, workerService, pool, logger),
+		Addr: configured.HTTPAddress,
+		Handler: httpapi.New(
+			jobService,
+			workerService,
+			pool,
+			logger,
+			httpapi.WithObserver(metrics),
+		),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -92,27 +120,38 @@ func run(logger *slog.Logger) error {
 	}
 
 	serverError := make(chan error, 1)
-	go func() { // Start HTTP server in a separate goroutine
+	go func() {
 		logger.Info("work-flow API listening", "address", server.Addr)
 		serverError <- server.ListenAndServe()
 	}()
 
+	var serveErr error
 	select {
-	case <-ctx.Done(): // Shutdown signal
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return server.Shutdown(shutdownCtx) // give existing requests time to finish, stop accepting new requests
-	case err := <-serverError: // Server error
+	case <-ctx.Done():
+		logger.Info("shutdown requested")
+	case err := <-serverError:
 		if errors.Is(err, http.ErrServerClosed) {
-			return nil
+			serveErr = nil
+		} else {
+			serveErr = err
 		}
-		return err
 	}
-}
 
-func environmentOrDefault(name, fallback string) string {
-	if value := os.Getenv(name); value != "" {
-		return value
+	cancelBackground()
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), configured.ShutdownTimeout)
+	defer cancelShutdown()
+	shutdownErr := server.Shutdown(shutdownCtx)
+
+	backgroundDone := make(chan struct{})
+	go func() {
+		background.Wait()
+		close(backgroundDone)
+	}()
+	select {
+	case <-backgroundDone:
+	case <-shutdownCtx.Done():
+		shutdownErr = errors.Join(shutdownErr, shutdownCtx.Err())
 	}
-	return fallback
+
+	return errors.Join(serveErr, shutdownErr)
 }
