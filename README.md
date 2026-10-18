@@ -4,9 +4,10 @@
 accepts jobs, persists their state, and coordinates workers that claim them for
 execution.
 
-Milestone 5 adds durable scheduler events. Every committed job transition is
-stored with an outbox event that can be delivered to Message-Flow without
-losing state changes during crashes or broker outages.
+Milestone 6 adds OpenTelemetry observability and operational hardening. The
+scheduler now produces standard traces and metrics, correlates structured logs,
+validates runtime configuration, and shuts down its HTTP and background work
+gracefully.
 
 ## Structure
 
@@ -17,6 +18,7 @@ internal/job           job model and application operations
 internal/worker        worker registration, heartbeat, and claim operations
 internal/recovery      background recovery of expired worker leases
 internal/outbox        durable event model and background publishing workflow
+internal/observability OpenTelemetry setup, metrics, and log correlation
 internal/postgres      PostgreSQL repository and migration runner
 migrations             embedded SQL schema migrations
 integration            end-to-end tests with a real PostgreSQL container
@@ -68,6 +70,20 @@ rules separate from HTTP and PostgreSQL without introducing separate services.
   becomes eligible again, providing at-least-once delivery after crashes.
 - Event IDs are stable across redelivery so Message-Flow consumers can safely
   deduplicate repeated deliveries.
+- HTTP requests and background recovery/outbox work produce OpenTelemetry
+  spans. W3C trace context is accepted from upstream services and propagated
+  through request contexts.
+- Metrics cover HTTP outcomes, recovery and outbox activity, jobs by state,
+  active and expired leases, and the pending outbox backlog.
+- Logs are emitted as structured JSON and include trace and span IDs whenever
+  they are written from an active trace.
+- OpenTelemetry uses OTLP over HTTP when an exporter endpoint is configured.
+  Without one, Work-Flow runs normally with zero external telemetry dependency.
+- Runtime durations and batch sizes are validated at startup so invalid
+  operational settings fail fast.
+- Shutdown stops new HTTP traffic, cancels the recovery loop, waits for
+  background work, closes PostgreSQL, and flushes telemetry within a bounded
+  timeout.
 
 ## Requirements
 
@@ -120,7 +136,9 @@ go test ./...
 Unit tests require only Go. Integration tests require Docker because they start
 and dispose of an isolated PostgreSQL container through Testcontainers. The
 integration suite verifies ordered lifecycle events, concurrent outbox claims,
-claim-token enforcement, and redelivery after a publisher claim expires.
+claim-token enforcement, redelivery after a publisher claim expires, and the
+database statistics used by operational gauges. Unit tests cover telemetry
+collection, log correlation, and configuration validation.
 
 ## Configuration
 
@@ -129,7 +147,27 @@ Local defaults match `compose.yaml`. Override them with environment variables:
 ```text
 DATABASE_URL=postgres://user:password@host:5432/database?sslmode=require
 HTTP_ADDR=127.0.0.1:5080
+LEASE_DURATION=30s
+RETRY_BASE=5s
+RETRY_MAXIMUM=5m
+RECOVERY_INTERVAL=2s
+RECOVERY_BATCH_SIZE=100
+SHUTDOWN_TIMEOUT=10s
+WORKFLOW_ENVIRONMENT=development
+WORKFLOW_VERSION=dev
 ```
+
+To export traces and metrics, point Work-Flow at any OTLP/HTTP-compatible
+collector. Signal-specific OpenTelemetry environment variables are also
+supported by the standard exporters.
+
+```text
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+```
+
+Set `OTEL_SDK_DISABLED=true` to explicitly disable telemetry export. Collector
+availability is not part of API readiness: an observability outage must not
+prevent jobs from being scheduled.
 
 The committed `workflow_dev` password protects only the disposable local Docker
 database and must never be reused outside local development.
@@ -139,9 +177,12 @@ from this computer only, not from other devices on the local network. A future
 deployment can deliberately override these bindings behind appropriate network
 controls and authentication.
 
-## Later milestones
+## Next phase
 
-- OpenTelemetry observability and operational hardening
+The six Work-Flow milestones now provide the scheduler foundation. The next
+phase connects its existing outbox publisher interface to Message-Flow, uses it
+as Build-Flow's execution backbone, and sends this telemetry to Observe-Flow for
+storage and visualization.
 
 The outbox publisher is deliberately transport-independent. It is not started
 by the API until Message-Flow defines its publishing protocol; its adapter can
