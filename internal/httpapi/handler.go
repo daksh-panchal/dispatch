@@ -9,11 +9,15 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/daksh-panchal/work-flow/internal/job"
 	"github.com/daksh-panchal/work-flow/internal/worker"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const maxRequestBodyBytes = 1 << 20
@@ -25,15 +29,37 @@ type Pinger interface {
 	Ping(context.Context) error
 }
 
-type Handler struct {
-	jobs    *job.Service
-	workers *worker.Service
-	pinger  Pinger
-	logger  *slog.Logger
+type HTTPObserver interface {
+	RecordHTTPRequest(context.Context, string, string, int, time.Duration)
 }
 
-func New(jobs *job.Service, workers *worker.Service, pinger Pinger, logger *slog.Logger) http.Handler {
+type Option func(*Handler)
+
+func WithObserver(observer HTTPObserver) Option {
+	return func(handler *Handler) {
+		handler.observer = observer
+	}
+}
+
+type Handler struct {
+	jobs     *job.Service
+	workers  *worker.Service
+	pinger   Pinger
+	logger   *slog.Logger
+	observer HTTPObserver
+}
+
+func New(
+	jobs *job.Service,
+	workers *worker.Service,
+	pinger Pinger,
+	logger *slog.Logger,
+	options ...Option,
+) http.Handler {
 	handler := &Handler{jobs: jobs, workers: workers, pinger: pinger, logger: logger}
+	for _, option := range options {
+		option(handler)
+	}
 	mux := http.NewServeMux() // HTTP router that matches requests to handler functions
 	mux.HandleFunc("GET /health/live", handler.live)
 	mux.HandleFunc("GET /health/ready", handler.ready)
@@ -47,7 +73,8 @@ func New(jobs *job.Service, workers *worker.Service, pinger Pinger, logger *slog
 	mux.HandleFunc("POST /api/v1/workers/{workerId}/jobs/{jobId}/lease", handler.renewLease)
 	mux.HandleFunc("POST /api/v1/workers/{workerId}/jobs/{jobId}/complete", handler.completeJob)
 	mux.HandleFunc("POST /api/v1/workers/{workerId}/jobs/{jobId}/fail", handler.failJob)
-	return handler.recoverPanics(mux) // Request fails with 500 Internal Server Error if panic
+	observed := handler.observeHTTP(handler.recoverPanics(mux))
+	return otelhttp.NewHandler(observed, "workflow.http")
 }
 
 type submitJobRequest struct {
@@ -140,7 +167,7 @@ func (handler *Handler) submitJob(writer http.ResponseWriter, request *http.Requ
 		case errors.Is(err, job.ErrIdempotencyConflict):
 			handler.writeProblem(writer, http.StatusConflict, "Idempotency conflict", err.Error())
 		default:
-			handler.logger.Error("submit job", "error", err)
+			handler.logger.ErrorContext(request.Context(), "submit job", "error", err)
 			handler.writeProblem(writer, http.StatusInternalServerError, "Internal server error", "")
 		}
 		return
@@ -167,7 +194,7 @@ func (handler *Handler) getJob(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	if err != nil { // Return 500 Internal Server Error for any other errors
-		handler.logger.Error("get job", "job_id", id, "error", err)
+		handler.logger.ErrorContext(request.Context(), "get job", "job_id", id, "error", err)
 		handler.writeProblem(writer, http.StatusInternalServerError, "Internal server error", "")
 		return
 	}
@@ -189,7 +216,7 @@ func (handler *Handler) cancelJob(writer http.ResponseWriter, request *http.Requ
 	case errors.Is(err, job.ErrCancellationConflict):
 		handler.writeProblem(writer, http.StatusConflict, "Cancellation conflict", err.Error())
 	case err != nil:
-		handler.logger.Error("cancel job", "job_id", id, "error", err)
+		handler.logger.ErrorContext(request.Context(), "cancel job", "job_id", id, "error", err)
 		handler.writeProblem(writer, http.StatusInternalServerError, "Internal server error", "")
 	default:
 		handler.writeJSON(writer, http.StatusOK, responseFromJob(cancelled))
@@ -209,7 +236,7 @@ func (handler *Handler) registerWorker(writer http.ResponseWriter, request *http
 		return
 	}
 	if err != nil {
-		handler.logger.Error("register worker", "error", err)
+		handler.logger.ErrorContext(request.Context(), "register worker", "error", err)
 		handler.writeProblem(writer, http.StatusInternalServerError, "Internal server error", "")
 		return
 	}
@@ -229,7 +256,7 @@ func (handler *Handler) heartbeatWorker(writer http.ResponseWriter, request *htt
 		return
 	}
 	if err != nil {
-		handler.logger.Error("heartbeat worker", "worker_id", workerID, "error", err)
+		handler.logger.ErrorContext(request.Context(), "heartbeat worker", "worker_id", workerID, "error", err)
 		handler.writeProblem(writer, http.StatusInternalServerError, "Internal server error", "")
 		return
 	}
@@ -248,7 +275,7 @@ func (handler *Handler) claimJob(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	if err != nil {
-		handler.logger.Error("claim job", "worker_id", workerID, "error", err)
+		handler.logger.ErrorContext(request.Context(), "claim job", "worker_id", workerID, "error", err)
 		handler.writeProblem(writer, http.StatusInternalServerError, "Internal server error", "")
 		return
 	}
@@ -257,7 +284,7 @@ func (handler *Handler) claimJob(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	if claimed.LeaseToken == nil {
-		handler.logger.Error("claimed job has no lease token", "job_id", claimed.ID)
+		handler.logger.ErrorContext(request.Context(), "claimed job has no lease token", "job_id", claimed.ID)
 		handler.writeProblem(writer, http.StatusInternalServerError, "Internal server error", "")
 		return
 	}
@@ -295,7 +322,7 @@ func (handler *Handler) renewLease(writer http.ResponseWriter, request *http.Req
 	case errors.Is(err, job.ErrLeaseLost):
 		handler.writeProblem(writer, http.StatusConflict, "Lease lost", err.Error())
 	case err != nil:
-		handler.logger.Error("renew job lease", "worker_id", workerID, "job_id", jobID, "error", err)
+		handler.logger.ErrorContext(request.Context(), "renew job lease", "worker_id", workerID, "job_id", jobID, "error", err)
 		handler.writeProblem(writer, http.StatusInternalServerError, "Internal server error", "")
 	default:
 		handler.writeJSON(writer, http.StatusOK, responseFromJob(renewed))
@@ -325,7 +352,7 @@ func (handler *Handler) completeJob(writer http.ResponseWriter, request *http.Re
 		body.LeaseToken,
 		body.Result,
 	)
-	handler.writeOutcome(writer, "complete job", workerID, jobID, completed, err)
+	handler.writeOutcome(request.Context(), writer, "complete job", workerID, jobID, completed, err)
 }
 
 func (handler *Handler) failJob(writer http.ResponseWriter, request *http.Request) {
@@ -351,7 +378,7 @@ func (handler *Handler) failJob(writer http.ResponseWriter, request *http.Reques
 		body.LeaseToken,
 		body.Error,
 	)
-	handler.writeOutcome(writer, "fail job", workerID, jobID, failed, err)
+	handler.writeOutcome(request.Context(), writer, "fail job", workerID, jobID, failed, err)
 }
 
 func (handler *Handler) live(writer http.ResponseWriter, _ *http.Request) { // Confirm HTTP app running
@@ -365,6 +392,7 @@ func (handler *Handler) ready(writer http.ResponseWriter, request *http.Request)
 	defer cancel() // Cancel context after 2 seconds to avoid hanging requests
 
 	if err := handler.pinger.Ping(ctx); err != nil { // Ping db to see if ready
+		handler.logger.WarnContext(request.Context(), "readiness check failed", "dependency", "postgres", "error", err)
 		handler.writeProblem(writer, http.StatusServiceUnavailable, "Not ready", "PostgreSQL is unavailable")
 		return
 	}
@@ -381,11 +409,73 @@ func (handler *Handler) recoverPanics(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		defer func() { // Recover from request panics and return 500 Internal Server Error
 			if recovered := recover(); recovered != nil {
-				handler.logger.Error("http panic", "panic", recovered)
+				handler.logger.ErrorContext(request.Context(), "http panic", "panic", recovered)
 				handler.writeProblem(writer, http.StatusInternalServerError, "Internal server error", "")
 			}
 		}()
 		next.ServeHTTP(writer, request)
+	})
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (writer *statusWriter) WriteHeader(status int) {
+	if writer.status != 0 {
+		return
+	}
+	writer.status = status
+	writer.ResponseWriter.WriteHeader(status)
+}
+
+func (writer *statusWriter) Write(body []byte) (int, error) {
+	if writer.status == 0 {
+		writer.WriteHeader(http.StatusOK)
+	}
+	return writer.ResponseWriter.Write(body)
+}
+
+func (handler *Handler) observeHTTP(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		startedAt := time.Now()
+		observedWriter := &statusWriter{ResponseWriter: writer}
+		next.ServeHTTP(observedWriter, request)
+
+		status := observedWriter.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		route := request.Pattern
+		if route == "" {
+			route = "unmatched"
+		} else if patternMethod, path, found := strings.Cut(route, " "); found && patternMethod == request.Method {
+			route = path
+		}
+		duration := time.Since(startedAt)
+
+		span := trace.SpanFromContext(request.Context())
+		span.SetName(request.Method + " " + route)
+		span.SetAttributes(attribute.String("http.route", route))
+
+		if handler.observer != nil {
+			handler.observer.RecordHTTPRequest(
+				request.Context(),
+				request.Method,
+				route,
+				status,
+				duration,
+			)
+		}
+		handler.logger.InfoContext(
+			request.Context(),
+			"http request",
+			"method", request.Method,
+			"route", route,
+			"status", status,
+			"duration_ms", duration.Milliseconds(),
+		)
 	})
 }
 
@@ -441,6 +531,7 @@ func (handler *Handler) parseWorkerAndJobIDs(
 }
 
 func (handler *Handler) writeOutcome(
+	ctx context.Context,
 	writer http.ResponseWriter,
 	operation string,
 	workerID uuid.UUID,
@@ -458,7 +549,7 @@ func (handler *Handler) writeOutcome(
 	case errors.Is(err, job.ErrLeaseLost):
 		handler.writeProblem(writer, http.StatusConflict, "Lease lost", err.Error())
 	case err != nil:
-		handler.logger.Error(operation, "worker_id", workerID, "job_id", jobID, "error", err)
+		handler.logger.ErrorContext(ctx, operation, "worker_id", workerID, "job_id", jobID, "error", err)
 		handler.writeProblem(writer, http.StatusInternalServerError, "Internal server error", "")
 	default:
 		handler.writeJSON(writer, http.StatusOK, responseFromJob(stored))
