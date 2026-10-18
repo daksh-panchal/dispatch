@@ -6,7 +6,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/daksh-panchal/work-flow/internal/observability"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 const maxPublishErrorLength = 2000
@@ -15,6 +18,10 @@ type PublishResult struct {
 	Claimed   int
 	Published int
 	Failed    int
+}
+
+type Observer interface {
+	RecordOutbox(context.Context, int, int, int, time.Duration, error)
 }
 
 type Service struct {
@@ -27,6 +34,7 @@ type Service struct {
 	retryMaximum time.Duration
 	batchSize    int
 	logger       *slog.Logger
+	observer     Observer
 }
 
 func NewService(
@@ -39,8 +47,9 @@ func NewService(
 	retryMaximum time.Duration,
 	batchSize int,
 	logger *slog.Logger,
+	observers ...Observer,
 ) *Service {
-	return &Service{
+	service := &Service{
 		store:        store,
 		publisher:    publisher,
 		now:          now,
@@ -51,9 +60,48 @@ func NewService(
 		batchSize:    batchSize,
 		logger:       logger,
 	}
+	if len(observers) > 0 {
+		service.observer = observers[0]
+	}
+	return service
 }
 
-func (service *Service) PublishOnce(ctx context.Context) (PublishResult, error) {
+func (service *Service) PublishOnce(ctx context.Context) (result PublishResult, err error) {
+	startedAt := time.Now()
+	ctx, span := observability.Tracer().Start(ctx, "outbox.publish_batch")
+	defer func() {
+		span.SetAttributes(
+			attribute.Int("workflow.outbox.claimed", result.Claimed),
+			attribute.Int("workflow.outbox.published", result.Published),
+			attribute.Int("workflow.outbox.failed", result.Failed),
+		)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "outbox publication failed")
+		}
+		if service.observer != nil {
+			service.observer.RecordOutbox(
+				ctx,
+				result.Claimed,
+				result.Published,
+				result.Failed,
+				time.Since(startedAt),
+				err,
+			)
+		}
+		if err != nil && ctx.Err() == nil {
+			service.logger.ErrorContext(ctx, "publish outbox events", "error", err)
+		} else if result.Published > 0 || result.Failed > 0 {
+			service.logger.InfoContext(
+				ctx,
+				"processed outbox events",
+				"published", result.Published,
+				"failed", result.Failed,
+			)
+		}
+		span.End()
+	}()
+
 	now := service.now().UTC()
 	claimToken := uuid.New()
 	events, err := service.store.ClaimBatch(ctx, ClaimParams{
@@ -66,7 +114,7 @@ func (service *Service) PublishOnce(ctx context.Context) (PublishResult, error) 
 		return PublishResult{}, err
 	}
 
-	result := PublishResult{Claimed: len(events)}
+	result = PublishResult{Claimed: len(events)}
 	for _, event := range events {
 		if err := service.publisher.Publish(ctx, event); err != nil {
 			failure := PublishFailure{
@@ -110,17 +158,7 @@ func (service *Service) publishAvailable(ctx context.Context) {
 	for {
 		result, err := service.PublishOnce(ctx)
 		if err != nil {
-			if ctx.Err() == nil {
-				service.logger.Error("publish outbox events", "error", err)
-			}
 			return
-		}
-		if result.Published > 0 || result.Failed > 0 {
-			service.logger.Info(
-				"processed outbox events",
-				"published", result.Published,
-				"failed", result.Failed,
-			)
 		}
 		if result.Claimed < service.batchSize {
 			return
