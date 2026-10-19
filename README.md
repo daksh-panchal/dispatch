@@ -13,6 +13,9 @@ clients without giving them direct database access.
 
 ```text
 cmd/workflow-api       process entry point and dependency wiring
+cmd/workflow-demo      local demo orchestrator entry point
+internal/demo          public API client and simulated worker orchestration
+internal/demoapi       demo control API and event-stream proxy
 internal/httpapi       HTTP transport
 internal/job           job model and application operations
 internal/worker        worker registration, heartbeat, and claim operations
@@ -25,8 +28,11 @@ migrations             embedded SQL schema migrations
 integration            end-to-end tests with a real PostgreSQL container
 ```
 
-This is one Go module and one deployable API. Package boundaries keep scheduling
-rules separate from HTTP and PostgreSQL without introducing separate services.
+This is one Go module containing the deployable scheduler API and an optional
+local demo process. Package boundaries keep scheduling rules separate from HTTP
+and PostgreSQL without turning scheduler internals into microservices. The demo
+orchestrator is not part of the scheduler: it behaves like an external client
+and never accesses PostgreSQL.
 
 ## Current behaviour
 
@@ -138,6 +144,49 @@ POST /api/v1/workers/{workerId}/jobs/{jobId}/fail
 
 Example requests are in `requests/work-flow.http`.
 
+## Run the demo orchestrator
+
+With PostgreSQL and `workflow-api` already running, start the local demo backend
+in another terminal:
+
+```powershell
+go run ./cmd/workflow-demo
+```
+
+It listens on `http://127.0.0.1:5090` and communicates with Work-Flow through
+`http://127.0.0.1:5080`. Start a run by choosing its number of jobs, workers,
+and approximate job duration:
+
+```http
+POST http://127.0.0.1:5090/api/v1/demo/runs
+Content-Type: application/json
+
+{
+  "jobCount": 12,
+  "workerCount": 3,
+  "workDurationMs": 5000
+}
+```
+
+Each run receives a unique ordinary queue. The orchestrator submits jobs,
+registers workers, claims work, renews leases, and completes jobs exclusively
+through the public Work-Flow API. Job priorities and durations vary slightly so
+repeated runs look natural while preserving the same scheduling guarantees.
+
+For a faster local crash-recovery demonstration, you can start `workflow-api`
+with shorter ordinary scheduler timings, for example `LEASE_DURATION=8s`,
+`RETRY_BASE=1s`, and `RECOVERY_INTERVAL=500ms`. These are existing scheduler
+settings, not a special recovery path for the demo.
+
+Calling the run's worker `kill` endpoint stops that worker immediately. It does
+not alter the job or release its lease. Work-Flow must detect the expired lease,
+recover the job, and allow another worker to claim it. Replacement workers can
+be added through the run's `workers` endpoint.
+
+Example controls are in `requests/work-flow-demo.http`. Demo run metadata is
+held in memory and resets when the demo process restarts; scheduler jobs,
+workers, and lifecycle events remain durable in PostgreSQL.
+
 ## Test
 
 ```powershell
@@ -168,6 +217,9 @@ RECOVERY_BATCH_SIZE=100
 SHUTDOWN_TIMEOUT=10s
 WORKFLOW_ENVIRONMENT=development
 WORKFLOW_VERSION=dev
+DEMO_HTTP_ADDR=127.0.0.1:5090
+WORKFLOW_API_URL=http://127.0.0.1:5080
+DEMO_SHUTDOWN_TIMEOUT=10s
 ```
 
 To export traces and metrics, point Work-Flow at any OTLP/HTTP-compatible
@@ -192,11 +244,10 @@ controls and authentication.
 
 ## Next phase
 
-The six Work-Flow milestones provide the scheduler foundation, and the first
-demo-support phase now provides read-only operational visibility. The next demo
-phase can build a separate orchestrator that uses the same public scheduling
-API as any other client; it does not need privileged access or demo-only state
-transitions inside Work-Flow.
+The scheduler foundation, operational read API, and separate demo orchestrator
+are now in place. The next demo phase can build the frontend against the demo
+API, combining its run controls and snapshots with the queue-isolated live event
+stream.
 
 The outbox publisher is deliberately transport-independent. It is not started
 by the API until Message-Flow defines its publishing protocol; its adapter can

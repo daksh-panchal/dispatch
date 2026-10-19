@@ -1,0 +1,43 @@
+@demoUrl = http://127.0.0.1:5090
+@runId = replace-with-run-id
+@workerId = replace-with-worker-id
+
+### Demo backend liveness
+GET {{demoUrl}}/health/live
+
+### Demo backend readiness (includes Work-Flow)
+GET {{demoUrl}}/health/ready
+
+### Start a self-running demo
+POST {{demoUrl}}/api/v1/demo/runs
+Content-Type: application/json
+
+{
+  "jobCount": 12,
+  "workerCount": 3,
+  "workDurationMs": 5000
+}
+
+### List runs known to this demo process
+GET {{demoUrl}}/api/v1/demo/runs
+
+### Read orchestration state
+GET {{demoUrl}}/api/v1/demo/runs/{{runId}}
+
+### Read the run plus durable scheduler jobs and workers
+GET {{demoUrl}}/api/v1/demo/runs/{{runId}}/snapshot
+
+### Watch this run's Work-Flow lifecycle events
+GET {{demoUrl}}/api/v1/demo/runs/{{runId}}/events/stream?afterSequence=0
+Accept: text/event-stream
+
+### Simulate a worker crash
+POST {{demoUrl}}/api/v1/demo/runs/{{runId}}/workers/{{workerId}}/kill
+
+### Add a replacement worker
+POST {{demoUrl}}/api/v1/demo/runs/{{runId}}/workers
+Content-Type: application/json
+
+{
+  "count": 1
+}

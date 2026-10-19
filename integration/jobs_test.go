@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/daksh-panchal/work-flow/internal/demo"
 	"github.com/daksh-panchal/work-flow/internal/httpapi"
 	"github.com/daksh-panchal/work-flow/internal/job"
 	"github.com/daksh-panchal/work-flow/internal/outbox"
@@ -214,6 +215,84 @@ func TestJobAPIAgainstPostgreSQL(t *testing.T) {
 		if err != nil || status != http.StatusOK {
 			t.Fatalf("complete read test job: status = %d, error = %v", status, err)
 		}
+	})
+
+	t.Run("demo orchestrator drives work and survives a worker crash", func(t *testing.T) {
+		demoClient, err := demo.NewHTTPClient(server.URL)
+		if err != nil {
+			t.Fatalf("create demo client: %v", err)
+		}
+		demoCtx, cancelDemo := context.WithCancel(ctx)
+		defer cancelDemo()
+		demoManager := demo.NewManager(
+			demoCtx,
+			demoClient,
+			logger,
+			demo.WithJitter(func(time.Duration) time.Duration { return 500 * time.Millisecond }),
+			demo.WithIntervals(10*time.Millisecond, 50*time.Millisecond),
+		)
+		run, err := demoManager.Start(ctx, demo.StartRunInput{
+			JobCount: 2, WorkerCount: 2, WorkDuration: 500 * time.Millisecond,
+		})
+		if err != nil {
+			t.Fatalf("start demo run: %v", err)
+		}
+
+		var victim uuid.UUID
+		claimDeadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(claimDeadline) {
+			current, getErr := demoManager.Get(run.ID)
+			if getErr != nil {
+				t.Fatalf("read demo run: %v", getErr)
+			}
+			for _, candidate := range current.Workers {
+				if candidate.Status == demo.WorkerWorking {
+					victim = candidate.ID
+					break
+				}
+			}
+			if victim != uuid.Nil {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if victim == uuid.Nil {
+			t.Fatal("no demo worker claimed a job")
+		}
+		if _, err := demoManager.KillWorker(run.ID, victim); err != nil {
+			t.Fatalf("kill demo worker: %v", err)
+		}
+
+		time.Sleep(testLeaseDuration + 50*time.Millisecond)
+		recovered, err := recoveryService.RecoverOnce(ctx)
+		if err != nil {
+			t.Fatalf("recover killed demo worker lease: %v", err)
+		}
+		if recovered.Requeued != 1 || recovered.Failed != 0 {
+			t.Fatalf("recovery result = %+v, want one requeued job", recovered)
+		}
+
+		completionDeadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(completionDeadline) {
+			current, getErr := demoManager.Get(run.ID)
+			if getErr != nil {
+				t.Fatalf("read demo run: %v", getErr)
+			}
+			if current.Status == demo.RunCompleted {
+				snapshot, snapshotErr := demoManager.Snapshot(ctx, run.ID)
+				if snapshotErr != nil {
+					t.Fatalf("read completed demo snapshot: %v", snapshotErr)
+				}
+				for _, stored := range snapshot.Jobs {
+					if stored.State != "succeeded" {
+						t.Fatalf("demo job %s state = %q, want succeeded", stored.ID, stored.State)
+					}
+				}
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatal("demo run did not complete after lease recovery")
 	})
 
 	t.Run("scheduler statistics reflect durable state", func(t *testing.T) {
