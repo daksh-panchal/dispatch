@@ -1,0 +1,98 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "work-flow demo API",
+    "version": "1.0.0",
+    "description": "Local demo control plane that uses the public Work-Flow API."
+  },
+  "paths": {
+    "/health/live": {
+      "get": { "responses": { "200": { "description": "Demo process is alive" } } }
+    },
+    "/health/ready": {
+      "get": { "responses": { "200": { "description": "Work-Flow is ready" }, "503": { "description": "Work-Flow is unavailable" } } }
+    },
+    "/api/v1/demo/runs": {
+      "get": {
+        "responses": { "200": { "description": "Known in-memory demo runs" } }
+      },
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StartRun" } } }
+        },
+        "responses": {
+          "201": { "description": "Demo jobs and workers created" },
+          "400": { "description": "Invalid demo configuration" },
+          "502": { "description": "Work-Flow rejected or could not process setup" }
+        }
+      }
+    },
+    "/api/v1/demo/runs/{runId}": {
+      "get": {
+        "parameters": [{ "$ref": "#/components/parameters/RunId" }],
+        "responses": { "200": { "description": "Demo orchestration state" }, "404": { "description": "Run not found" } }
+      }
+    },
+    "/api/v1/demo/runs/{runId}/snapshot": {
+      "get": {
+        "parameters": [{ "$ref": "#/components/parameters/RunId" }],
+        "responses": { "200": { "description": "Run metadata plus current Work-Flow jobs and workers" }, "404": { "description": "Run not found" } }
+      }
+    },
+    "/api/v1/demo/runs/{runId}/workers": {
+      "post": {
+        "parameters": [{ "$ref": "#/components/parameters/RunId" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AddWorkers" } } }
+        },
+        "responses": { "201": { "description": "Workers registered and started" }, "404": { "description": "Run not found" } }
+      }
+    },
+    "/api/v1/demo/runs/{runId}/workers/{workerId}/kill": {
+      "post": {
+        "description": "Stops the simulated worker without completing or releasing its current lease.",
+        "parameters": [
+          { "$ref": "#/components/parameters/RunId" },
+          { "name": "workerId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": { "200": { "description": "Worker stopped" }, "404": { "description": "Run or worker not found" } }
+      }
+    },
+    "/api/v1/demo/runs/{runId}/events/stream": {
+      "get": {
+        "parameters": [
+          { "$ref": "#/components/parameters/RunId" },
+          { "name": "afterSequence", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 0 } },
+          { "name": "Last-Event-ID", "in": "header", "schema": { "type": "integer", "minimum": 0 } }
+        ],
+        "responses": {
+          "200": { "description": "Queue-isolated Work-Flow events", "content": { "text/event-stream": {} } },
+          "404": { "description": "Run not found" }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "RunId": { "name": "runId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+    },
+    "schemas": {
+      "StartRun": {
+        "type": "object",
+        "required": ["jobCount", "workerCount", "workDurationMs"],
+        "properties": {
+          "jobCount": { "type": "integer", "minimum": 1, "maximum": 100 },
+          "workerCount": { "type": "integer", "minimum": 1, "maximum": 20 },
+          "workDurationMs": { "type": "integer", "minimum": 100, "maximum": 300000 }
+        }
+      },
+      "AddWorkers": {
+        "type": "object",
+        "required": ["count"],
+        "properties": { "count": { "type": "integer", "minimum": 1, "maximum": 20 } }
+      }
+    }
+  }
+}
