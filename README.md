@@ -4,10 +4,10 @@
 accepts jobs, persists their state, and coordinates workers that claim them for
 execution.
 
-Milestone 6 adds OpenTelemetry observability and operational hardening. The
-scheduler now produces standard traces and metrics, correlates structured logs,
-validates runtime configuration, and shuts down its HTTP and background work
-gracefully.
+The scheduler foundation includes durable execution, recovery, lifecycle
+events, and OpenTelemetry observability. Its read API now exposes paginated
+operational state and a resumable live event stream for dashboards and other
+clients without giving them direct database access.
 
 ## Structure
 
@@ -19,6 +19,7 @@ internal/worker        worker registration, heartbeat, and claim operations
 internal/recovery      background recovery of expired worker leases
 internal/outbox        durable event model and background publishing workflow
 internal/observability OpenTelemetry setup, metrics, and log correlation
+internal/readmodel     validated operational queries and derived worker status
 internal/postgres      PostgreSQL repository and migration runner
 migrations             embedded SQL schema migrations
 integration            end-to-end tests with a real PostgreSQL container
@@ -34,11 +35,14 @@ rules separate from HTTP and PostgreSQL without introducing separate services.
   `200 OK`.
 - Reusing a key with different request contents returns `409 Conflict`.
 - `GET /api/v1/jobs/{id}` returns persisted state or `404 Not Found`.
+- `GET /api/v1/jobs` lists jobs with queue/state filters and cursor pagination.
 - `POST /api/v1/jobs/{id}/cancel` moves a queued or running job to `cancelled`,
   clears any active lease, and returns the existing job when repeated.
 - PostgreSQL's unique constraint provides the final concurrency guarantee for
   idempotent submission.
 - `POST /api/v1/workers` registers a worker for one queue.
+- `GET /api/v1/workers` lists workers and derives their `idle`, `busy`, or
+  `offline` status from durable leases and real heartbeats.
 - `POST /api/v1/workers/{workerId}/heartbeat` records that a worker is alive.
 - `POST /api/v1/workers/{workerId}/claims` atomically claims the highest-priority
   eligible job, or returns `204 No Content` when the queue is empty.
@@ -70,6 +74,9 @@ rules separate from HTTP and PostgreSQL without introducing separate services.
   becomes eligible again, providing at-least-once delivery after crashes.
 - Event IDs are stable across redelivery so Message-Flow consumers can safely
   deduplicate repeated deliveries.
+- `GET /api/v1/events` reads the durable event history in sequence order.
+- `GET /api/v1/events/stream` provides a Server-Sent Events feed that can be
+  filtered by queue or job and resumed with `Last-Event-ID`.
 - HTTP requests and background recovery/outbox work produce OpenTelemetry
   spans. W3C trace context is accepted from upstream services and propagated
   through request contexts.
@@ -115,9 +122,13 @@ GET  /health/live
 GET  /health/ready
 GET  /openapi/v1.json
 POST /api/v1/jobs
+GET  /api/v1/jobs?queue={queue}&state={state}
 GET  /api/v1/jobs/{id}
 POST /api/v1/jobs/{id}/cancel
 POST /api/v1/workers
+GET  /api/v1/workers?queue={queue}
+GET  /api/v1/events?queue={queue}&afterSequence={sequence}
+GET  /api/v1/events/stream?queue={queue}&afterSequence={sequence}
 POST /api/v1/workers/{workerId}/heartbeat
 POST /api/v1/workers/{workerId}/claims
 POST /api/v1/workers/{workerId}/jobs/{jobId}/lease
@@ -135,10 +146,12 @@ go test ./...
 
 Unit tests require only Go. Integration tests require Docker because they start
 and dispose of an isolated PostgreSQL container through Testcontainers. The
-integration suite verifies ordered lifecycle events, concurrent outbox claims,
-claim-token enforcement, redelivery after a publisher claim expires, and the
-database statistics used by operational gauges. Unit tests cover telemetry
-collection, log correlation, and configuration validation.
+integration suite verifies ordered lifecycle events, operational pagination,
+worker status, live event streaming, concurrent outbox claims, claim-token
+enforcement, redelivery after a publisher claim expires, and the database
+statistics used by operational gauges. Unit tests cover read-query validation,
+worker status derivation, telemetry collection, log correlation, and
+configuration validation.
 
 ## Configuration
 
@@ -179,10 +192,11 @@ controls and authentication.
 
 ## Next phase
 
-The six Work-Flow milestones now provide the scheduler foundation. The next
-phase connects its existing outbox publisher interface to Message-Flow, uses it
-as Build-Flow's execution backbone, and sends this telemetry to Observe-Flow for
-storage and visualization.
+The six Work-Flow milestones provide the scheduler foundation, and the first
+demo-support phase now provides read-only operational visibility. The next demo
+phase can build a separate orchestrator that uses the same public scheduling
+API as any other client; it does not need privileged access or demo-only state
+transitions inside Work-Flow.
 
 The outbox publisher is deliberately transport-independent. It is not started
 by the API until Message-Flow defines its publishing protocol; its adapter can

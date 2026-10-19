@@ -1,6 +1,7 @@
 package integration_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -18,6 +19,7 @@ import (
 	"github.com/daksh-panchal/work-flow/internal/job"
 	"github.com/daksh-panchal/work-flow/internal/outbox"
 	workflowpostgres "github.com/daksh-panchal/work-flow/internal/postgres"
+	"github.com/daksh-panchal/work-flow/internal/readmodel"
 	"github.com/daksh-panchal/work-flow/internal/recovery"
 	"github.com/daksh-panchal/work-flow/internal/worker"
 	"github.com/google/uuid"
@@ -62,6 +64,7 @@ func TestJobAPIAgainstPostgreSQL(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	jobRepository := workflowpostgres.NewJobRepository(pool)
 	workerRepository := workflowpostgres.NewWorkerRepository(pool)
+	readRepository := workflowpostgres.NewReadRepository(pool)
 	jobService := job.NewService(jobRepository, time.Now)
 	const (
 		testLeaseDuration = 250 * time.Millisecond
@@ -76,6 +79,7 @@ func TestJobAPIAgainstPostgreSQL(t *testing.T) {
 		testRetryBase,
 		testRetryMaximum,
 	)
+	readService := readmodel.NewService(readRepository, time.Now, testLeaseDuration)
 	recoveryService := recovery.NewService(
 		jobRepository,
 		time.Now,
@@ -85,7 +89,13 @@ func TestJobAPIAgainstPostgreSQL(t *testing.T) {
 		100,
 		logger,
 	)
-	server := httptest.NewServer(httpapi.New(jobService, workerService, pool, logger))
+	server := httptest.NewServer(httpapi.New(
+		jobService,
+		workerService,
+		pool,
+		logger,
+		httpapi.WithReader(readService),
+	))
 	t.Cleanup(server.Close)
 
 	t.Run("submitted job can be retrieved", func(t *testing.T) {
@@ -108,6 +118,101 @@ func TestJobAPIAgainstPostgreSQL(t *testing.T) {
 		}
 		if string(retrieved.Payload) != `{"command":"build"}` {
 			t.Fatalf("retrieved payload = %s", retrieved.Payload)
+		}
+	})
+
+	t.Run("operational reads expose jobs workers and durable events", func(t *testing.T) {
+		queue := "read-" + uuid.NewString()
+		first := submitJobWithOptions(
+			t,
+			server.URL,
+			"integration-"+uuid.NewString(),
+			queue,
+			"first",
+			0,
+			http.StatusCreated,
+		)
+		_ = submitJobWithOptions(
+			t,
+			server.URL,
+			"integration-"+uuid.NewString(),
+			queue,
+			"second",
+			0,
+			http.StatusCreated,
+		)
+
+		var firstPage apiJobPage
+		getJSON(t, server.URL+"/api/v1/jobs?queue="+queue+"&state=queued&limit=1", &firstPage)
+		if len(firstPage.Items) != 1 || firstPage.NextCursor == nil {
+			t.Fatalf("first job page = %+v, want one item and a cursor", firstPage)
+		}
+		var secondPage apiJobPage
+		getJSON(t, server.URL+"/api/v1/jobs?queue="+queue+"&state=queued&limit=1&cursor="+firstPage.NextCursor.String(), &secondPage)
+		if len(secondPage.Items) != 1 || secondPage.Items[0].ID == firstPage.Items[0].ID {
+			t.Fatalf("second job page = %+v, want the other job", secondPage)
+		}
+
+		registered := registerWorker(t, server.URL, "read-worker", queue)
+		status, claimed, err := claimJobResult(server.URL, registered.ID)
+		if err != nil || status != http.StatusOK {
+			t.Fatalf("claim job: status = %d, error = %v", status, err)
+		}
+		var workers apiWorkerPage
+		getJSON(t, server.URL+"/api/v1/workers?queue="+queue, &workers)
+		if len(workers.Items) != 1 || workers.Items[0].Status != "busy" || workers.Items[0].CurrentJobID == nil {
+			t.Fatalf("worker page = %+v, want one busy worker", workers)
+		}
+
+		var events apiEventPage
+		getJSON(t, server.URL+"/api/v1/events?queue="+queue+"&jobId="+claimed.Job.ID.String(), &events)
+		if len(events.Items) < 2 {
+			t.Fatalf("event page has %d items, want submitted and claimed events", len(events.Items))
+		}
+		for _, event := range events.Items {
+			if event.JobID != claimed.Job.ID || !json.Valid(event.Payload) {
+				t.Fatalf("event = %+v, want matching job and JSON payload", event)
+			}
+		}
+
+		streamCtx, cancelStream := context.WithTimeout(ctx, 3*time.Second)
+		defer cancelStream()
+		request, err := http.NewRequestWithContext(
+			streamCtx,
+			http.MethodGet,
+			server.URL+"/api/v1/events/stream?jobId="+first.ID.String(),
+			nil,
+		)
+		if err != nil {
+			t.Fatalf("create event stream request: %v", err)
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatalf("open event stream: %v", err)
+		}
+		foundData := false
+		scanner := bufio.NewScanner(response.Body)
+		for scanner.Scan() {
+			if len(scanner.Text()) >= 6 && scanner.Text()[:6] == "data: " {
+				foundData = true
+				break
+			}
+		}
+		_ = response.Body.Close()
+		cancelStream()
+		if !foundData {
+			t.Fatalf("event stream returned no data: %v", scanner.Err())
+		}
+
+		status, _, err = completeJobResult(
+			server.URL,
+			registered.ID,
+			claimed.Job.ID,
+			claimed.LeaseToken,
+			json.RawMessage(`{"artifact":"read-test"}`),
+		)
+		if err != nil || status != http.StatusOK {
+			t.Fatalf("complete read test job: status = %d, error = %v", status, err)
 		}
 	})
 
@@ -741,6 +846,7 @@ func TestJobAPIAgainstPostgreSQL(t *testing.T) {
 
 type apiJob struct {
 	ID             uuid.UUID       `json:"id"`
+	Queue          string          `json:"queue"`
 	Priority       int             `json:"priority"`
 	Payload        json.RawMessage `json:"payload"`
 	State          string          `json:"state"`
@@ -759,6 +865,34 @@ type apiWorker struct {
 	Name       string    `json:"name"`
 	Queue      string    `json:"queue"`
 	LastSeenAt time.Time `json:"lastSeenAt"`
+}
+
+type apiJobPage struct {
+	Items      []apiJob   `json:"items"`
+	NextCursor *uuid.UUID `json:"nextCursor"`
+}
+
+type apiWorkerSnapshot struct {
+	apiWorker
+	Status       string     `json:"status"`
+	CurrentJobID *uuid.UUID `json:"currentJobId"`
+}
+
+type apiWorkerPage struct {
+	Items      []apiWorkerSnapshot `json:"items"`
+	NextCursor *uuid.UUID          `json:"nextCursor"`
+}
+
+type apiEvent struct {
+	Sequence int64           `json:"sequence"`
+	JobID    uuid.UUID       `json:"jobId"`
+	Type     string          `json:"type"`
+	Payload  json.RawMessage `json:"payload"`
+}
+
+type apiEventPage struct {
+	Items        []apiEvent `json:"items"`
+	NextSequence *int64     `json:"nextSequence"`
 }
 
 type apiClaim struct {
@@ -871,6 +1005,19 @@ func registerWorker(t *testing.T, baseURL, name, queue string) apiWorker {
 	var registered apiWorker
 	decodeResponse(t, response, &registered)
 	return registered
+}
+
+func getJSON(t *testing.T, url string, destination any) {
+	t.Helper()
+	response, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s status = %d, want %d", url, response.StatusCode, http.StatusOK)
+	}
+	decodeResponse(t, response, destination)
 }
 
 func claimJobResult(baseURL string, workerID uuid.UUID) (int, apiClaim, error) {

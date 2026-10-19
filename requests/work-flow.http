@@ -27,6 +27,9 @@ Idempotency-Key: example-build-005
 ### Retrieve a job
 GET {{baseUrl}}/api/v1/jobs/{{jobId}}
 
+### List jobs (filter and paginate with state, limit, and cursor as needed)
+GET {{baseUrl}}/api/v1/jobs?queue=default&state=queued&limit=50
+
 ### Cancel a queued or running job
 POST {{baseUrl}}/api/v1/jobs/{{jobId}}/cancel
 
@@ -38,6 +41,16 @@ Content-Type: application/json
   "name": "local-builder-2",
   "queue": "default"
 }
+
+### List workers with derived idle, busy, or offline status
+GET {{baseUrl}}/api/v1/workers?queue=default&limit=50
+
+### Read durable lifecycle events
+GET {{baseUrl}}/api/v1/events?queue=default&afterSequence=0&limit=50
+
+### Stream new and existing lifecycle events (Server-Sent Events)
+GET {{baseUrl}}/api/v1/events/stream?queue=default&afterSequence=0
+Accept: text/event-stream
 
 ### Record a worker heartbeat
 POST {{baseUrl}}/api/v1/workers/{{workerId}}/heartbeat
