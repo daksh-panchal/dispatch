@@ -15,6 +15,7 @@ import (
 	"github.com/daksh-panchal/work-flow/internal/job"
 	"github.com/daksh-panchal/work-flow/internal/observability"
 	workflowpostgres "github.com/daksh-panchal/work-flow/internal/postgres"
+	"github.com/daksh-panchal/work-flow/internal/readmodel"
 	"github.com/daksh-panchal/work-flow/internal/recovery"
 	"github.com/daksh-panchal/work-flow/internal/worker"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -76,7 +77,9 @@ func run(logger *slog.Logger) (runErr error) {
 
 	jobRepository := workflowpostgres.NewJobRepository(pool)
 	workerRepository := workflowpostgres.NewWorkerRepository(pool)
+	readRepository := workflowpostgres.NewReadRepository(pool)
 	jobService := job.NewService(jobRepository, time.Now)
+	readService := readmodel.NewService(readRepository, time.Now, configured.LeaseDuration)
 	workerService := worker.NewService(
 		workerRepository,
 		jobRepository,
@@ -112,6 +115,7 @@ func run(logger *slog.Logger) (runErr error) {
 			pool,
 			logger,
 			httpapi.WithObserver(metrics),
+			httpapi.WithReader(readService),
 		),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,

@@ -41,12 +41,19 @@ func WithObserver(observer HTTPObserver) Option {
 	}
 }
 
+func WithReader(reader Reader) Option {
+	return func(handler *Handler) {
+		handler.reader = reader
+	}
+}
+
 type Handler struct {
 	jobs     *job.Service
 	workers  *worker.Service
 	pinger   Pinger
 	logger   *slog.Logger
 	observer HTTPObserver
+	reader   Reader
 }
 
 func New(
@@ -65,6 +72,12 @@ func New(
 	mux.HandleFunc("GET /health/ready", handler.ready)
 	mux.HandleFunc("GET /openapi/v1.json", handler.openAPI)
 	mux.HandleFunc("POST /api/v1/jobs", handler.submitJob)
+	if handler.reader != nil {
+		mux.HandleFunc("GET /api/v1/jobs", handler.listJobs)
+		mux.HandleFunc("GET /api/v1/workers", handler.listWorkers)
+		mux.HandleFunc("GET /api/v1/events", handler.listEvents)
+		mux.HandleFunc("GET /api/v1/events/stream", handler.streamEvents)
+	}
 	mux.HandleFunc("GET /api/v1/jobs/{id}", handler.getJob)
 	mux.HandleFunc("POST /api/v1/jobs/{id}/cancel", handler.cancelJob)
 	mux.HandleFunc("POST /api/v1/workers", handler.registerWorker)
@@ -435,6 +448,14 @@ func (writer *statusWriter) Write(body []byte) (int, error) {
 		writer.WriteHeader(http.StatusOK)
 	}
 	return writer.ResponseWriter.Write(body)
+}
+
+func (writer *statusWriter) Unwrap() http.ResponseWriter {
+	return writer.ResponseWriter
+}
+
+func (writer *statusWriter) Flush() {
+	_ = http.NewResponseController(writer.ResponseWriter).Flush()
 }
 
 func (handler *Handler) observeHTTP(next http.Handler) http.Handler {

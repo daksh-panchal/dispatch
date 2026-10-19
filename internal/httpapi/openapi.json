@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "work-flow API",
-    "version": "6.0.0"
+    "version": "6.1.0"
   },
   "paths": {
     "/health/live": {
@@ -12,6 +12,18 @@
       "get": { "responses": { "200": { "description": "PostgreSQL is reachable" }, "503": { "description": "Not ready" } } }
     },
     "/api/v1/jobs": {
+      "get": {
+        "parameters": [
+          { "name": "queue", "in": "query", "schema": { "type": "string", "maxLength": 100 } },
+          { "name": "state", "in": "query", "schema": { "type": "string", "enum": ["queued", "running", "succeeded", "failed", "cancelled"] } },
+          { "name": "cursor", "in": "query", "schema": { "type": "string", "format": "uuid" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 } }
+        ],
+        "responses": {
+          "200": { "description": "Newest jobs matching the filters" },
+          "400": { "description": "Invalid filter or cursor" }
+        }
+      },
       "post": {
         "parameters": [
           { "name": "Idempotency-Key", "in": "header", "required": true, "schema": { "type": "string" } }
@@ -51,6 +63,17 @@
       }
     },
     "/api/v1/workers": {
+      "get": {
+        "parameters": [
+          { "name": "queue", "in": "query", "schema": { "type": "string", "maxLength": 100 } },
+          { "name": "cursor", "in": "query", "schema": { "type": "string", "format": "uuid" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 } }
+        ],
+        "responses": {
+          "200": { "description": "Registered workers with derived idle, busy, or offline status" },
+          "400": { "description": "Invalid filter or cursor" }
+        }
+      },
       "post": {
         "requestBody": {
           "required": true,
@@ -133,6 +156,38 @@
           "200": { "description": "Failure recorded; job was scheduled for retry or permanently failed" },
           "404": { "description": "Worker or job not found" },
           "409": { "description": "Lease is expired or no longer owned by this worker" }
+        }
+      }
+    },
+    "/api/v1/events": {
+      "get": {
+        "parameters": [
+          { "name": "queue", "in": "query", "schema": { "type": "string", "maxLength": 100 } },
+          { "name": "jobId", "in": "query", "schema": { "type": "string", "format": "uuid" } },
+          { "name": "afterSequence", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 0 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 } }
+        ],
+        "responses": {
+          "200": { "description": "Durable job lifecycle events in sequence order" },
+          "400": { "description": "Invalid filter or sequence cursor" }
+        }
+      }
+    },
+    "/api/v1/events/stream": {
+      "get": {
+        "description": "Streams durable job lifecycle events using Server-Sent Events. Last-Event-ID can resume a disconnected stream.",
+        "parameters": [
+          { "name": "queue", "in": "query", "schema": { "type": "string", "maxLength": 100 } },
+          { "name": "jobId", "in": "query", "schema": { "type": "string", "format": "uuid" } },
+          { "name": "afterSequence", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 0 } },
+          { "name": "Last-Event-ID", "in": "header", "schema": { "type": "integer", "minimum": 0 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Live event stream",
+            "content": { "text/event-stream": {} }
+          },
+          "400": { "description": "Invalid filter or sequence cursor" }
         }
       }
     }
