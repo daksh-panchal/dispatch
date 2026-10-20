@@ -2,11 +2,12 @@ package demoapi
 
 import (
 	"context"
-	_ "embed"
+	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -21,6 +22,9 @@ const maxRequestBodyBytes = 1 << 20
 //go:embed openapi.json
 var openAPIDocument []byte
 
+//go:embed web/*
+var webFiles embed.FS
+
 type SchedulerGateway interface {
 	Ready(context.Context) error
 	OpenEventStream(context.Context, string, int64, string) (*http.Response, error)
@@ -34,6 +38,10 @@ type Handler struct {
 
 func New(manager *demo.Manager, scheduler SchedulerGateway, logger *slog.Logger) http.Handler {
 	handler := &Handler{manager: manager, scheduler: scheduler, logger: logger}
+	webRoot, err := fs.Sub(webFiles, "web")
+	if err != nil {
+		panic(fmt.Sprintf("load embedded demo frontend: %v", err))
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health/live", handler.live)
 	mux.HandleFunc("GET /health/ready", handler.ready)
@@ -45,6 +53,10 @@ func New(manager *demo.Manager, scheduler SchedulerGateway, logger *slog.Logger)
 	mux.HandleFunc("POST /api/v1/demo/runs/{runId}/workers", handler.addWorkers)
 	mux.HandleFunc("POST /api/v1/demo/runs/{runId}/workers/{workerId}/kill", handler.killWorker)
 	mux.HandleFunc("GET /api/v1/demo/runs/{runId}/events/stream", handler.streamEvents)
+	mux.Handle("GET /{$}", handler.frontend(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.ServeFileFS(writer, request, webRoot, "demo.html")
+	})))
+	mux.Handle("GET /", handler.frontend(http.FileServer(http.FS(webRoot))))
 	return handler.recoverPanics(handler.logRequests(mux))
 }
 
@@ -239,6 +251,13 @@ func (handler *Handler) openAPI(writer http.ResponseWriter, _ *http.Request) {
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(http.StatusOK)
 	_, _ = writer.Write(openAPIDocument)
+}
+
+func (handler *Handler) frontend(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Cache-Control", "no-cache")
+		next.ServeHTTP(writer, request)
+	})
 }
 
 func (handler *Handler) ready(writer http.ResponseWriter, request *http.Request) {

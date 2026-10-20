@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A live operations console for the Work-Flow distributed job scheduler.">
+  <title>Work-Flow · Demo Console</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M6 5h5v5H6zM13 14h5v5h-5zM11 7.5h3.5A3.5 3.5 0 0 1 18 11v3M8.5 10v2.5A3.5 3.5 0 0 0 12 16h1"/></svg>
+        </span>
+        <span>work-flow</span>
+      </div>
+      <div id="connection" class="connection is-checking" role="status">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span id="connection-label">Connecting…</span>
+      </div>
+    </header>
+
+    <section class="run-header" aria-labelledby="run-heading">
+      <div class="run-copy">
+        <div class="title-row">
+          <h1 id="run-heading">No active run</h1>
+          <span id="run-status" class="status-pill">ready</span>
+        </div>
+        <p id="run-context">Start a run to watch jobs move through the scheduler.</p>
+      </div>
+
+      <form id="run-form" class="run-form" aria-label="Start a demo run">
+        <label>Jobs <input id="job-count" type="number" min="1" max="100" value="12" required></label>
+        <label>Workers <input id="worker-count" type="number" min="1" max="20" value="3" required></label>
+        <label>Duration
+          <select id="work-duration">
+            <option value="3000">3 seconds</option>
+            <option value="5000" selected>5 seconds</option>
+            <option value="8000">8 seconds</option>
+            <option value="12000">12 seconds</option>
+          </select>
+        </label>
+        <button id="start-run" class="button primary" type="submit"><span>Start run</span></button>
+      </form>
+    </section>
+
+    <section class="run-toolbar" aria-label="Run selection and controls">
+      <label class="run-picker">Run
+        <select id="run-picker" aria-label="Select a demo run"><option value="">No runs yet</option></select>
+      </label>
+      <div class="progress" aria-label="Run progress">
+        <div><span>Progress</span><strong id="progress-label">0%</strong></div>
+        <div class="track"><span id="progress-fill"></span></div>
+      </div>
+      <button id="add-worker" class="button" type="button" disabled><span>+ Add worker</span></button>
+    </section>
+
+    <section class="metrics" aria-label="Run summary">
+      <metric-card id="metric-queued" label="Queued" note="Waiting for capacity"></metric-card>
+      <metric-card id="metric-running" label="Running" note="Active leases"></metric-card>
+      <metric-card id="metric-retrying" label="Retrying" note="Recovered attempts" tone="warning"></metric-card>
+      <metric-card id="metric-succeeded" label="Succeeded" note="0% complete" tone="success"></metric-card>
+      <metric-card id="metric-workers" label="Workers" note="None connected"></metric-card>
+    </section>
+
+    <div class="dashboard">
+      <section class="panel jobs-panel" aria-labelledby="jobs-title">
+        <header class="panel-header"><h2 id="jobs-title">Jobs</h2><code id="queue-label">queue —</code></header>
+        <div class="board">
+          <section class="lane" aria-labelledby="queued-title">
+            <header><h3 id="queued-title">Queued</h3><span id="count-queued">0</span></header>
+            <div id="jobs-queued" class="job-list"><p class="empty">No queued jobs</p></div>
+          </section>
+          <section class="lane" aria-labelledby="running-title">
+            <header><h3 id="running-title">Running</h3><span id="count-running">0</span></header>
+            <div id="jobs-running" class="job-list"><p class="empty">No active leases</p></div>
+          </section>
+          <section class="lane" aria-labelledby="retrying-title">
+            <header><h3 id="retrying-title">Retrying</h3><span id="count-retrying">0</span></header>
+            <div id="jobs-retrying" class="job-list"><p class="empty">No recovered jobs</p></div>
+          </section>
+          <section class="lane" aria-labelledby="terminal-title">
+            <header><h3 id="terminal-title">Finished</h3><span id="count-terminal">0</span></header>
+            <div id="jobs-terminal" class="job-list"><p class="empty">Nothing finished yet</p></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="panel workers-panel" aria-labelledby="workers-title">
+        <header class="panel-header"><h2 id="workers-title">Workers</h2><span id="workers-summary">0 registered</span></header>
+        <div id="worker-list" class="worker-list"><p class="empty tall">Workers appear when a run starts.</p></div>
+      </section>
+
+      <section class="panel events-panel" aria-labelledby="events-title">
+        <header class="panel-header">
+          <h2 id="events-title">Events</h2>
+          <div id="stream-state" class="stream-state"><span class="status-dot"></span><span id="stream-label">Waiting for a run</span></div>
+        </header>
+        <div id="event-list" class="event-list" aria-live="polite"><p class="empty">Lifecycle events will appear here.</p></div>
+      </section>
+    </div>
+  </main>
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>

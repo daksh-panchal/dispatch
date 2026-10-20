@@ -43,11 +43,22 @@ func TestHandlerServesOpenAPIAndReadiness(t *testing.T) {
 	manager := demo.NewManager(context.Background(), nil, logger)
 	handler := New(manager, stubGateway{}, logger)
 
-	for _, path := range []string{"/health/ready", "/openapi/v1.json"} {
+	for _, path := range []string{
+		"/",
+		"/demo.html",
+		"/app.js",
+		"/styles.css",
+		"/components/job-card.js",
+		"/health/ready",
+		"/openapi/v1.json",
+	} {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 		if response.Code != http.StatusOK {
 			t.Fatalf("GET %s status = %d, want %d", path, response.Code, http.StatusOK)
+		}
+		if path == "/" && !strings.Contains(response.Body.String(), "Work-Flow · Demo Console") {
+			t.Fatal("frontend response does not contain the demo console")
 		}
 	}
 }

@@ -15,7 +15,7 @@ clients without giving them direct database access.
 cmd/workflow-api       process entry point and dependency wiring
 cmd/workflow-demo      local demo orchestrator entry point
 internal/demo          public API client and simulated worker orchestration
-internal/demoapi       demo control API and event-stream proxy
+internal/demoapi       demo control API, event-stream proxy, and embedded UI
 internal/httpapi       HTTP transport
 internal/job           job model and application operations
 internal/worker        worker registration, heartbeat, and claim operations
@@ -154,8 +154,9 @@ go run ./cmd/workflow-demo
 ```
 
 It listens on `http://127.0.0.1:5090` and communicates with Work-Flow through
-`http://127.0.0.1:5080`. Start a run by choosing its number of jobs, workers,
-and approximate job duration:
+`http://127.0.0.1:5080`. Open `http://127.0.0.1:5090` in a browser to use the
+demo console. Choose the number of jobs, workers, and approximate job duration,
+then watch the real scheduler state update live.
 
 ```http
 POST http://127.0.0.1:5090/api/v1/demo/runs
@@ -244,10 +245,10 @@ controls and authentication.
 
 ## Next phase
 
-The scheduler foundation, operational read API, and separate demo orchestrator
-are now in place. The next demo phase can build the frontend against the demo
-API, combining its run controls and snapshots with the queue-isolated live event
-stream.
+The scheduler foundation, operational read API, demo orchestrator, and live
+frontend are now in place. The final demo phase can focus on packaging and
+polish: a one-command startup path, final end-to-end checks, and presentation
+documentation.
 
 The outbox publisher is deliberately transport-independent. It is not started
 by the API until Message-Flow defines its publishing protocol; its adapter can
