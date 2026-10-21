@@ -8,16 +8,55 @@ services:
       POSTGRES_USER: workflow
       POSTGRES_PASSWORD: workflow_dev
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - workflow-postgres-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U workflow -d workflow"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+      interval: 2s
+      timeout: 3s
+      retries: 15
       start_period: 5s
-    restart: unless-stopped
+    stop_grace_period: 15s
+
+  workflow-api:
+    build:
+      context: .
+      target: workflow-api
+    environment:
+      DATABASE_URL: postgres://workflow:workflow_dev@postgres:5432/workflow?sslmode=disable
+      HTTP_ADDR: 0.0.0.0:5080
+      LEASE_DURATION: ${LEASE_DURATION:-8s}
+      RETRY_BASE: ${RETRY_BASE:-1s}
+      RETRY_MAXIMUM: ${RETRY_MAXIMUM:-30s}
+      RECOVERY_INTERVAL: ${RECOVERY_INTERVAL:-500ms}
+      RECOVERY_BATCH_SIZE: ${RECOVERY_BATCH_SIZE:-100}
+      SHUTDOWN_TIMEOUT: ${SHUTDOWN_TIMEOUT:-10s}
+      WORKFLOW_ENVIRONMENT: demo
+      WORKFLOW_VERSION: local
+    ports:
+      - "127.0.0.1:${WORKFLOW_API_PORT:-5080}:5080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    init: true
+    stop_grace_period: 15s
+
+  workflow-demo:
+    build:
+      context: .
+      target: workflow-demo
+    environment:
+      DEMO_HTTP_ADDR: 0.0.0.0:5090
+      WORKFLOW_API_URL: http://workflow-api:5080
+      DEMO_SHUTDOWN_TIMEOUT: ${DEMO_SHUTDOWN_TIMEOUT:-10s}
+    ports:
+      - "127.0.0.1:${WORKFLOW_DEMO_PORT:-5090}:5090"
+    depends_on:
+      workflow-api:
+        condition: service_healthy
+    init: true
+    stop_grace_period: 15s
 
 volumes:
   workflow-postgres-data:

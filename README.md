@@ -1,211 +1,193 @@
-# work-flow
+# Work-Flow
 
-`work-flow` is a distributed job scheduler. It
-accepts jobs, persists their state, and coordinates workers that claim them for
-execution.
+Work-Flow is a durable distributed job scheduler written in Go. It accepts
+jobs, persists their state in PostgreSQL, and coordinates workers that claim and
+execute them safely—even when requests are repeated or workers disappear.
 
-The scheduler foundation includes durable execution, recovery, lifecycle
-events, and OpenTelemetry observability. Its read API now exposes paginated
-operational state and a resumable live event stream for dashboards and other
-clients without giving them direct database access.
+The project is the scheduling backbone of the wider Flow ecosystem. Build-Flow
+will use it to distribute builds, Message-Flow will carry lifecycle events, and
+Observe-Flow will visualize its behaviour.
 
-## Structure
+## Key features
 
-```text
-cmd/workflow-api       process entry point and dependency wiring
-cmd/workflow-demo      local demo orchestrator entry point
-internal/demo          public API client and simulated worker orchestration
-internal/demoapi       demo control API, event-stream proxy, and embedded UI
-internal/httpapi       HTTP transport
-internal/job           job model and application operations
-internal/worker        worker registration, heartbeat, and claim operations
-internal/recovery      background recovery of expired worker leases
-internal/outbox        durable event model and background publishing workflow
-internal/observability OpenTelemetry setup, metrics, and log correlation
-internal/readmodel     validated operational queries and derived worker status
-internal/postgres      PostgreSQL repository and migration runner
-migrations             embedded SQL schema migrations
-integration            end-to-end tests with a real PostgreSQL container
+- Durable job submission with idempotency and conflict detection
+- Atomic, priority-aware job claiming across concurrent workers
+- Time-limited leases, heartbeats, and stale-worker fencing
+- Automatic recovery when a worker crashes or stops renewing its lease
+- Bounded retries with exponential backoff
+- Safe completion, failure, and cancellation under concurrency
+- Transactional outbox events for reliable future delivery to Message-Flow
+- Structured logs, metrics, and distributed traces through OpenTelemetry
+- Paginated operational views and a resumable live event stream
+- An interactive failure-recovery demo using the real public API
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Browser[Demo console] --> Demo[Demo orchestrator]
+    Demo -->|public HTTP API| Scheduler[Work-Flow scheduler]
+    Scheduler --> Database[(PostgreSQL)]
+    Scheduler --> Outbox[Durable event outbox]
+    Outbox -. future adapter .-> MessageFlow[Message-Flow]
+    Scheduler -. telemetry .-> ObserveFlow[Observe-Flow]
 ```
 
-This is one Go module containing the deployable scheduler API and an optional
-local demo process. Package boundaries keep scheduling rules separate from HTTP
-and PostgreSQL without turning scheduler internals into microservices. The demo
-orchestrator is not part of the scheduler: it behaves like an external client
-and never accesses PostgreSQL.
+The scheduler owns durable job state, leases, retries, recovery, and lifecycle
+events. The demo orchestrator creates simulated workers but uses the same public
+API that Build-Flow and future external workers will use. Neither the browser nor
+the demo process accesses PostgreSQL directly.
 
-## Current behaviour
+## Key design decisions
 
-- `POST /api/v1/jobs` creates a queued job and returns `201 Created`.
-- Repeating the same request and `Idempotency-Key` returns the original job with
-  `200 OK`.
-- Reusing a key with different request contents returns `409 Conflict`.
-- `GET /api/v1/jobs/{id}` returns persisted state or `404 Not Found`.
-- `GET /api/v1/jobs` lists jobs with queue/state filters and cursor pagination.
-- `POST /api/v1/jobs/{id}/cancel` moves a queued or running job to `cancelled`,
-  clears any active lease, and returns the existing job when repeated.
-- PostgreSQL's unique constraint provides the final concurrency guarantee for
-  idempotent submission.
-- `POST /api/v1/workers` registers a worker for one queue.
-- `GET /api/v1/workers` lists workers and derives their `idle`, `busy`, or
-  `offline` status from durable leases and real heartbeats.
-- `POST /api/v1/workers/{workerId}/heartbeat` records that a worker is alive.
-- `POST /api/v1/workers/{workerId}/claims` atomically claims the highest-priority
-  eligible job, or returns `204 No Content` when the queue is empty.
-- A claim moves the job from `queued` to `running`, increments its attempt count,
-  and grants the worker a 30-second lease.
-- `POST /api/v1/workers/{workerId}/jobs/{jobId}/lease` renews a valid lease.
-- `POST /api/v1/workers/{workerId}/jobs/{jobId}/complete` records a successful
-  result and moves the job to `succeeded`.
-- `POST /api/v1/workers/{workerId}/jobs/{jobId}/fail` records an error. The job
-  is delayed and requeued when attempts remain, or moved to `failed` when its
-  retry budget is exhausted.
-- Retry delays use capped exponential backoff: 5 seconds, 10 seconds, 20
-  seconds, and so on, up to 5 minutes.
-- A background recovery loop finds expired leases every 2 seconds. It safely
-  requeues the job or permanently fails it when no attempts remain.
-- Completion, failure, and renewal require the current worker ID, lease token,
-  and an unexpired lease. A stale worker receives `409 Conflict`.
-- Cancellation, completion, and failure use conditional PostgreSQL updates, so
-  concurrent terminal transitions have exactly one winner. Cancelling a job
-  that already succeeded or failed returns `409 Conflict`.
-- PostgreSQL row locking with `FOR UPDATE SKIP LOCKED` prevents concurrent workers
-  from claiming or recovering the same job.
-- Job submission, claiming, retry scheduling, recovery, completion, failure, and
-  cancellation write versioned events to `job_outbox_events` in the same
-  PostgreSQL transaction as their state change.
-- Outbox events use short-lived claim leases so multiple publisher instances can
-  work concurrently without publishing the same event at the same time.
-- Failed publications use capped exponential backoff. An expired publisher claim
-  becomes eligible again, providing at-least-once delivery after crashes.
-- Event IDs are stable across redelivery so Message-Flow consumers can safely
-  deduplicate repeated deliveries.
-- `GET /api/v1/events` reads the durable event history in sequence order.
-- `GET /api/v1/events/stream` provides a Server-Sent Events feed that can be
-  filtered by queue or job and resumed with `Last-Event-ID`.
-- HTTP requests and background recovery/outbox work produce OpenTelemetry
-  spans. W3C trace context is accepted from upstream services and propagated
-  through request contexts.
-- Metrics cover HTTP outcomes, recovery and outbox activity, jobs by state,
-  active and expired leases, and the pending outbox backlog.
-- Logs are emitted as structured JSON and include trace and span IDs whenever
-  they are written from an active trace.
-- OpenTelemetry uses OTLP over HTTP when an exporter endpoint is configured.
-  Without one, Work-Flow runs normally with zero external telemetry dependency.
-- Runtime durations and batch sizes are validated at startup so invalid
-  operational settings fail fast.
-- Shutdown stops new HTTP traffic, cancels the recovery loop, waits for
-  background work, closes PostgreSQL, and flushes telemetry within a bounded
-  timeout.
+**PostgreSQL is the source of truth.** Job state and ownership survive process
+restarts. Unique constraints enforce idempotency, while row-level locking with
+`FOR UPDATE SKIP LOCKED` lets workers claim different jobs concurrently without
+claiming the same job twice.
+
+**Leases represent temporary ownership.** A worker must renew its lease while a
+job is running. If the lease expires, a background recovery loop makes the job
+eligible for another attempt. Lease tokens fence off stale workers so that an
+old worker cannot overwrite a newer result.
+
+**State changes and events are committed together.** Every important job
+transition writes a versioned outbox event in the same transaction. This avoids
+the failure window where database state changes but its message is lost, while
+keeping the eventual Message-Flow adapter separate from scheduling logic.
+
+**The scheduler remains transport-independent.** HTTP handlers translate
+requests into application operations; PostgreSQL code owns persistence; core
+packages own scheduling rules. These are package boundaries within one Go
+application, not independently deployed microservices.
+
+**The demo is a real client.** Its simulated workers register, claim, renew,
+complete, and fail work through the public API. The UI therefore demonstrates
+the actual scheduler rather than a separate scripted version of it.
+
+## Project structure
+
+```text
+cmd/          API and demo process entry points
+internal/     scheduler, persistence, telemetry, and demo packages
+migrations/   embedded PostgreSQL schema migrations
+integration/  end-to-end tests against a real PostgreSQL container
+requests/     example HTTP requests for manual exploration
+```
 
 ## Requirements
 
-- Go 1.27 or newer
-- Docker Desktop
+- Docker Desktop for the one-command demo and integration tests
+- Go 1.27 or newer for direct local development
 
-## Run locally
+## Quick demo
 
-Start PostgreSQL:
+Start PostgreSQL, the scheduler, and the demo console with one command:
 
 ```powershell
-docker compose up -d
+docker compose up --build
 ```
 
-Restore modules and start the API:
+Compose waits for PostgreSQL to become healthy before starting Work-Flow, then
+waits for Work-Flow readiness before starting the demo. When all three services
+are healthy, open [http://127.0.0.1:5090](http://127.0.0.1:5090).
+
+For a useful failure-recovery demonstration:
+
+1. Start 8 jobs with 3 workers and an 8-second duration.
+2. Kill a worker while it is marked `WORKING`.
+3. Watch its lease expire and the job emit `JobRecovered`.
+4. Watch a surviving worker claim the recovered job as its next attempt.
+5. Confirm that the run still reaches 100% completion.
+
+Compose uses short lease and retry timings so recovery is visible without a
+long wait. These are ordinary scheduler settings, not a demo-only recovery
+path. Every service is published on `127.0.0.1`, so the demo is accessible only
+from the computer running it.
+
+Press `Ctrl+C` to stop a foreground run. Remove the stopped containers and
+network with:
 
 ```powershell
-go mod download
+docker compose down
+```
+
+This preserves the PostgreSQL volume, so jobs and events remain available on
+the next run. To deliberately reset the local demo to a completely fresh
+database, remove the volume instead:
+
+```powershell
+docker compose down --volumes
+```
+
+This reset command permanently deletes only the disposable local database. The
+schema is recreated automatically the next time Compose starts.
+
+To follow logs while running Compose in the background, use:
+
+```powershell
+docker compose up --build -d
+docker compose logs -f workflow-api workflow-demo
+```
+
+## Development workflow
+
+To run the Go processes directly during development, start only PostgreSQL:
+
+```powershell
+docker compose up -d postgres
+```
+
+Then start the scheduler and demo in separate terminals:
+
+```powershell
 go run ./cmd/workflow-api
 ```
-
-The API automatically applies embedded database migrations and listens on
-`http://localhost:5080`.
-
-Useful endpoints:
-
-```text
-GET  /health/live
-GET  /health/ready
-GET  /openapi/v1.json
-POST /api/v1/jobs
-GET  /api/v1/jobs?queue={queue}&state={state}
-GET  /api/v1/jobs/{id}
-POST /api/v1/jobs/{id}/cancel
-POST /api/v1/workers
-GET  /api/v1/workers?queue={queue}
-GET  /api/v1/events?queue={queue}&afterSequence={sequence}
-GET  /api/v1/events/stream?queue={queue}&afterSequence={sequence}
-POST /api/v1/workers/{workerId}/heartbeat
-POST /api/v1/workers/{workerId}/claims
-POST /api/v1/workers/{workerId}/jobs/{jobId}/lease
-POST /api/v1/workers/{workerId}/jobs/{jobId}/complete
-POST /api/v1/workers/{workerId}/jobs/{jobId}/fail
-```
-
-Example requests are in `requests/work-flow.http`.
-
-## Run the demo orchestrator
-
-With PostgreSQL and `workflow-api` already running, start the local demo backend
-in another terminal:
 
 ```powershell
 go run ./cmd/workflow-demo
 ```
 
-It listens on `http://127.0.0.1:5090` and communicates with Work-Flow through
-`http://127.0.0.1:5080`. Open `http://127.0.0.1:5090` in a browser to use the
-demo console. Choose the number of jobs, workers, and approximate job duration,
-then watch the real scheduler state update live.
+The API automatically applies embedded migrations and listens on
+`http://127.0.0.1:5080`. The demo listens on `http://127.0.0.1:5090`.
+Example API requests are available in `requests/work-flow.http` and
+`requests/work-flow-demo.http`.
 
-```http
-POST http://127.0.0.1:5090/api/v1/demo/runs
-Content-Type: application/json
+Each demo run receives a unique ordinary queue. The orchestrator submits jobs,
+registers workers, claims work, renews leases, and records outcomes exclusively
+through the public Work-Flow API. Demo run metadata is held in memory and resets
+when the demo process restarts; scheduler jobs, workers, and lifecycle events
+remain durable in PostgreSQL.
 
-{
-  "jobCount": 12,
-  "workerCount": 3,
-  "workDurationMs": 5000
-}
-```
-
-Each run receives a unique ordinary queue. The orchestrator submits jobs,
-registers workers, claims work, renews leases, and completes jobs exclusively
-through the public Work-Flow API. Job priorities and durations vary slightly so
-repeated runs look natural while preserving the same scheduling guarantees.
-
-For a faster local crash-recovery demonstration, you can start `workflow-api`
-with shorter ordinary scheduler timings, for example `LEASE_DURATION=8s`,
-`RETRY_BASE=1s`, and `RECOVERY_INTERVAL=500ms`. These are existing scheduler
-settings, not a special recovery path for the demo.
-
-Calling the run's worker `kill` endpoint stops that worker immediately. It does
-not alter the job or release its lease. Work-Flow must detect the expired lease,
-recover the job, and allow another worker to claim it. Replacement workers can
-be added through the run's `workers` endpoint.
-
-Example controls are in `requests/work-flow-demo.http`. Demo run metadata is
-held in memory and resets when the demo process restarts; scheduler jobs,
-workers, and lifecycle events remain durable in PostgreSQL.
+The complete machine-readable HTTP contract is available from the running API
+at [http://127.0.0.1:5080/openapi/v1.json](http://127.0.0.1:5080/openapi/v1.json).
 
 ## Test
 
 ```powershell
 go test ./...
+go vet ./...
+docker compose config --quiet
 ```
 
 Unit tests require only Go. Integration tests require Docker because they start
-and dispose of an isolated PostgreSQL container through Testcontainers. The
-integration suite verifies ordered lifecycle events, operational pagination,
-worker status, live event streaming, concurrent outbox claims, claim-token
-enforcement, redelivery after a publisher claim expires, and the database
-statistics used by operational gauges. Unit tests cover read-query validation,
-worker status derivation, telemetry collection, log correlation, and
-configuration validation.
+and dispose of an isolated PostgreSQL container through Testcontainers. Together
+they cover scheduling rules, concurrent claims, leases, retries, recovery,
+outbox delivery, operational reads, telemetry, and the demo workflow.
+
+The end-to-end recovery scenario can also be run on its own:
+
+```powershell
+go test ./integration -run "TestJobAPIAgainstPostgreSQL/demo_orchestrator_drives_work_and_survives_a_worker_crash" -v -count=1
+```
+
+That test uses real PostgreSQL and the public HTTP API. It starts a demo run,
+kills a worker holding a lease, invokes recovery, verifies that exactly one job
+is requeued, and waits for every job to succeed.
 
 ## Configuration
 
-Local defaults match `compose.yaml`. Override them with environment variables:
+When the Go processes run directly, they use conservative application defaults.
+Override them with environment variables:
 
 ```text
 DATABASE_URL=postgres://user:password@host:5432/database?sslmode=require
@@ -223,6 +205,17 @@ WORKFLOW_API_URL=http://127.0.0.1:5080
 DEMO_SHUTDOWN_TIMEOUT=10s
 ```
 
+Docker Compose supplies container addresses and shorter demo timings. Its ports
+and timing settings can be customized without editing `compose.yaml`:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+The committed `.env.example` documents every Compose override. The resulting
+`.env` file is ignored by Git and is optional—the built-in values support the
+one-command demo without any setup.
+
 To export traces and metrics, point Work-Flow at any OTLP/HTTP-compatible
 collector. Signal-specific OpenTelemetry environment variables are also
 supported by the standard exporters.
@@ -238,19 +231,20 @@ prevent jobs from being scheduled.
 The committed `workflow_dev` password protects only the disposable local Docker
 database and must never be reused outside local development.
 
-The local API and PostgreSQL port bind to `127.0.0.1`, so they are reachable
-from this computer only, not from other devices on the local network. A future
-deployment can deliberately override these bindings behind appropriate network
-controls and authentication.
+The local API, demo, and PostgreSQL ports bind to `127.0.0.1`, so they are
+reachable from this computer only, not from other devices on the local network.
+A future deployment can deliberately override these bindings behind appropriate
+network controls and authentication.
 
-## Next phase
+## Flow ecosystem integration
 
-The scheduler foundation, operational read API, demo orchestrator, and live
-frontend are now in place. The final demo phase can focus on packaging and
-polish: a one-command startup path, final end-to-end checks, and presentation
-documentation.
+Work-Flow's standalone portfolio scope is complete: it provides durable
+scheduling, worker coordination, retries, crash recovery, operational reads,
+telemetry instrumentation, and a repeatable interactive demonstration.
 
 The outbox publisher is deliberately transport-independent. It is not started
 by the API until Message-Flow defines its publishing protocol; its adapter can
 then implement the existing `outbox.Publisher` interface without changing job
-transactions or delivery guarantees.
+transactions or delivery guarantees. Build-Flow can submit jobs and operate
+workers through the existing HTTP contract, while Observe-Flow can consume the
+OpenTelemetry signals and durable lifecycle events already emitted here.

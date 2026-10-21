@@ -1,8 +1,16 @@
 .git
 .github
+.idea
 .vscode
+.env*
 bin
-dist
 coverage
+dist
+integration
+requests
+*.exe
 *.log
+*.out
+*.test
+*.tmp
 README.md
