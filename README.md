@@ -4,9 +4,9 @@ Work-Flow is a durable distributed job scheduler written in Go. It accepts
 jobs, persists their state in PostgreSQL, and coordinates workers that claim and
 execute them safely—even when requests are repeated or workers disappear.
 
-The project is the scheduling backbone of the wider Flow ecosystem. Build-Flow
-will use it to distribute builds, Message-Flow will carry lifecycle events, and
-Observe-Flow will visualize its behaviour.
+This project demonstrates the core reliability
+patterns behind job schedulers: durable state, concurrent worker
+coordination, failure recovery, lifecycle events, and operational visibility.
 
 ## Key features
 
@@ -16,7 +16,7 @@ Observe-Flow will visualize its behaviour.
 - Automatic recovery when a worker crashes or stops renewing its lease
 - Bounded retries with exponential backoff
 - Safe completion, failure, and cancellation under concurrency
-- Transactional outbox events for reliable future delivery to Message-Flow
+- Transactional outbox events for durable lifecycle history and live streaming
 - Structured logs, metrics, and distributed traces through OpenTelemetry
 - Paginated operational views and a resumable live event stream
 - An interactive failure-recovery demo using the real public API
@@ -29,14 +29,13 @@ flowchart LR
     Demo -->|public HTTP API| Scheduler[Work-Flow scheduler]
     Scheduler --> Database[(PostgreSQL)]
     Scheduler --> Outbox[Durable event outbox]
-    Outbox -. future adapter .-> MessageFlow[Message-Flow]
-    Scheduler -. telemetry .-> ObserveFlow[Observe-Flow]
+    Scheduler -. OTLP .-> Collector[Optional telemetry collector]
 ```
 
 The scheduler owns durable job state, leases, retries, recovery, and lifecycle
 events. The demo orchestrator creates simulated workers but uses the same public
-API that Build-Flow and future external workers will use. Neither the browser nor
-the demo process accesses PostgreSQL directly.
+API that any external client or worker would use. Neither the browser nor the
+demo process accesses PostgreSQL directly.
 
 ## Key design decisions
 
@@ -52,8 +51,9 @@ old worker cannot overwrite a newer result.
 
 **State changes and events are committed together.** Every important job
 transition writes a versioned outbox event in the same transaction. This avoids
-the failure window where database state changes but its message is lost, while
-keeping the eventual Message-Flow adapter separate from scheduling logic.
+the failure window where database state changes but its corresponding lifecycle
+event is lost. Those durable events support operational history and the
+resumable live stream exposed by Work-Flow.
 
 **The scheduler remains transport-independent.** HTTP handlers translate
 requests into application operations; PostgreSQL code owns persistence; core
@@ -236,15 +236,13 @@ reachable from this computer only, not from other devices on the local network.
 A future deployment can deliberately override these bindings behind appropriate
 network controls and authentication.
 
-## Flow ecosystem integration
+## Standalone scope
 
 Work-Flow's standalone portfolio scope is complete: it provides durable
 scheduling, worker coordination, retries, crash recovery, operational reads,
 telemetry instrumentation, and a repeatable interactive demonstration.
 
-The outbox publisher is deliberately transport-independent. It is not started
-by the API until Message-Flow defines its publishing protocol; its adapter can
-then implement the existing `outbox.Publisher` interface without changing job
-transactions or delivery guarantees. Build-Flow can submit jobs and operate
-workers through the existing HTTP contract, while Observe-Flow can consume the
-OpenTelemetry signals and durable lifecycle events already emitted here.
+Clients and workers interact through its documented HTTP
+API, PostgreSQL stores scheduler state and lifecycle events, the included demo
+visualizes real scheduler behaviour, and optional OpenTelemetry export allows
+standard external tooling to collect traces and metrics if desired.
