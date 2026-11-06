@@ -57,13 +57,13 @@ func TestMetricsCollectSchedulerState(t *testing.T) {
 		}
 	}
 	for _, name := range []string{
-		"workflow.http.requests",
-		"workflow.http.request.duration",
-		"workflow.recovery.jobs",
-		"workflow.jobs",
-		"workflow.leases.active",
-		"workflow.leases.expired",
-		"workflow.outbox.pending",
+		"dispatch.http.requests",
+		"dispatch.http.request.duration",
+		"dispatch.recovery.jobs",
+		"dispatch.jobs",
+		"dispatch.leases.active",
+		"dispatch.leases.expired",
+		"dispatch.outbox.pending",
 	} {
 		if !names[name] {
 			t.Errorf("metric %q was not collected", name)

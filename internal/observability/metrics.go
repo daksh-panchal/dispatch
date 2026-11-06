@@ -29,37 +29,37 @@ type Metrics struct {
 
 func NewMetrics(meter metric.Meter, reader StatsReader, logger *slog.Logger) (*Metrics, error) {
 	httpRequests, err := meter.Int64Counter(
-		"workflow.http.requests",
-		metric.WithDescription("Number of HTTP requests handled by Work-Flow"),
+		"dispatch.http.requests",
+		metric.WithDescription("Number of HTTP requests handled by Dispatch"),
 	)
 	if err != nil {
 		return nil, err
 	}
 	httpDuration, err := meter.Float64Histogram(
-		"workflow.http.request.duration",
-		metric.WithDescription("Duration of HTTP requests handled by Work-Flow"),
+		"dispatch.http.request.duration",
+		metric.WithDescription("Duration of HTTP requests handled by Dispatch"),
 		metric.WithUnit("s"),
 	)
 	if err != nil {
 		return nil, err
 	}
 	recoveryJobs, err := meter.Int64Counter(
-		"workflow.recovery.jobs",
+		"dispatch.recovery.jobs",
 		metric.WithDescription("Number of expired jobs processed by recovery"),
 	)
 	if err != nil {
 		return nil, err
 	}
 	outboxEvents, err := meter.Int64Counter(
-		"workflow.outbox.events",
+		"dispatch.outbox.events",
 		metric.WithDescription("Number of outbox events processed for publication"),
 	)
 	if err != nil {
 		return nil, err
 	}
 	backgroundDuration, err := meter.Float64Histogram(
-		"workflow.background.duration",
-		metric.WithDescription("Duration of Work-Flow background operations"),
+		"dispatch.background.duration",
+		metric.WithDescription("Duration of Dispatch background operations"),
 		metric.WithUnit("s"),
 	)
 	if err != nil {
@@ -114,7 +114,7 @@ func (metrics *Metrics) RecordRecovery(
 		metrics.recoveryJobs.Add(ctx, failed, metric.WithAttributes(attribute.String("outcome", "failed")))
 	}
 	metrics.backgroundDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(
-		attribute.String("workflow.operation", "recovery"),
+		attribute.String("dispatch.operation", "recovery"),
 		attribute.Bool("error", err != nil),
 	))
 }
@@ -137,7 +137,7 @@ func (metrics *Metrics) RecordOutbox(
 		metrics.outboxEvents.Add(ctx, 0, metric.WithAttributes(attribute.String("outcome", "idle")))
 	}
 	metrics.backgroundDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(
-		attribute.String("workflow.operation", "outbox.publish"),
+		attribute.String("dispatch.operation", "outbox.publish"),
 		attribute.Bool("error", err != nil),
 	))
 }
@@ -148,28 +148,28 @@ func (metrics *Metrics) registerSchedulerGauges(
 	logger *slog.Logger,
 ) error {
 	jobs, err := meter.Int64ObservableGauge(
-		"workflow.jobs",
+		"dispatch.jobs",
 		metric.WithDescription("Current number of jobs by state"),
 	)
 	if err != nil {
 		return err
 	}
 	activeLeases, err := meter.Int64ObservableGauge(
-		"workflow.leases.active",
+		"dispatch.leases.active",
 		metric.WithDescription("Current number of unexpired job leases"),
 	)
 	if err != nil {
 		return err
 	}
 	expiredLeases, err := meter.Int64ObservableGauge(
-		"workflow.leases.expired",
+		"dispatch.leases.expired",
 		metric.WithDescription("Current number of expired job leases awaiting recovery"),
 	)
 	if err != nil {
 		return err
 	}
 	pendingOutbox, err := meter.Int64ObservableGauge(
-		"workflow.outbox.pending",
+		"dispatch.outbox.pending",
 		metric.WithDescription("Current number of unpublished outbox events"),
 	)
 	if err != nil {

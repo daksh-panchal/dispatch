@@ -11,13 +11,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/daksh-panchal/work-flow/internal/httpapi"
-	"github.com/daksh-panchal/work-flow/internal/job"
-	"github.com/daksh-panchal/work-flow/internal/observability"
-	workflowpostgres "github.com/daksh-panchal/work-flow/internal/postgres"
-	"github.com/daksh-panchal/work-flow/internal/readmodel"
-	"github.com/daksh-panchal/work-flow/internal/recovery"
-	"github.com/daksh-panchal/work-flow/internal/worker"
+	"github.com/daksh-panchal/dispatch/internal/httpapi"
+	"github.com/daksh-panchal/dispatch/internal/job"
+	"github.com/daksh-panchal/dispatch/internal/observability"
+	dispatchpostgres "github.com/daksh-panchal/dispatch/internal/postgres"
+	"github.com/daksh-panchal/dispatch/internal/readmodel"
+	"github.com/daksh-panchal/dispatch/internal/recovery"
+	"github.com/daksh-panchal/dispatch/internal/worker"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -26,7 +26,7 @@ func main() {
 		Level: slog.LevelInfo,
 	})))
 	if err := run(logger); err != nil {
-		logger.Error("work-flow stopped", "error", err)
+		logger.Error("Dispatch stopped", "error", err)
 		os.Exit(1)
 	}
 }
@@ -50,7 +50,7 @@ func run(logger *slog.Logger) (runErr error) {
 		return err
 	}
 
-	if err := workflowpostgres.Migrate(ctx, pool); err != nil {
+	if err := dispatchpostgres.Migrate(ctx, pool); err != nil {
 		return err
 	}
 
@@ -69,15 +69,15 @@ func run(logger *slog.Logger) (runErr error) {
 		"metrics_enabled", telemetry.MetricsEnabled,
 	)
 
-	statsRepository := workflowpostgres.NewStatsRepository(pool)
+	statsRepository := dispatchpostgres.NewStatsRepository(pool)
 	metrics, err := observability.NewMetrics(observability.Meter(), statsRepository, logger)
 	if err != nil {
 		return err
 	}
 
-	jobRepository := workflowpostgres.NewJobRepository(pool)
-	workerRepository := workflowpostgres.NewWorkerRepository(pool)
-	readRepository := workflowpostgres.NewReadRepository(pool)
+	jobRepository := dispatchpostgres.NewJobRepository(pool)
+	workerRepository := dispatchpostgres.NewWorkerRepository(pool)
+	readRepository := dispatchpostgres.NewReadRepository(pool)
 	jobService := job.NewService(jobRepository, time.Now)
 	readService := readmodel.NewService(readRepository, time.Now, configured.LeaseDuration)
 	workerService := worker.NewService(
@@ -125,7 +125,7 @@ func run(logger *slog.Logger) (runErr error) {
 
 	serverError := make(chan error, 1)
 	go func() {
-		logger.Info("work-flow API listening", "address", server.Addr)
+		logger.Info("Dispatch API listening", "address", server.Addr)
 		serverError <- server.ListenAndServe()
 	}()
 

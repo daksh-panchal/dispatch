@@ -1,7 +1,7 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "work-flow API",
+    "title": "Dispatch API",
     "version": "6.1.0"
   },
   "paths": {

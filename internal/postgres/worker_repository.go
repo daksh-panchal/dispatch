@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/daksh-panchal/work-flow/internal/worker"
+	"github.com/daksh-panchal/dispatch/internal/worker"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"

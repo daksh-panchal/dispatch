@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/daksh-panchal/work-flow/internal/job"
-	"github.com/daksh-panchal/work-flow/internal/worker"
+	"github.com/daksh-panchal/dispatch/internal/job"
+	"github.com/daksh-panchal/dispatch/internal/worker"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/attribute"
@@ -87,7 +87,7 @@ func New(
 	mux.HandleFunc("POST /api/v1/workers/{workerId}/jobs/{jobId}/complete", handler.completeJob)
 	mux.HandleFunc("POST /api/v1/workers/{workerId}/jobs/{jobId}/fail", handler.failJob)
 	observed := handler.observeHTTP(handler.recoverPanics(mux))
-	return otelhttp.NewHandler(observed, "workflow.http")
+	return otelhttp.NewHandler(observed, "dispatch.http")
 }
 
 type submitJobRequest struct {

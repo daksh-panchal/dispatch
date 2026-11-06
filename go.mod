@@ -1,4 +1,4 @@
-module github.com/daksh-panchal/work-flow
+module github.com/daksh-panchal/dispatch
 
 go 1.27
 

@@ -11,7 +11,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestHTTPClientUsesWorkFlowPublicContract(t *testing.T) {
+func TestHTTPClientUsesDispatchPublicContract(t *testing.T) {
 	workerID := uuid.New()
 	jobID := uuid.New()
 	leaseToken := uuid.New()
@@ -104,7 +104,7 @@ func TestHTTPClientReportsProblemDetails(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = client.Ready(context.Background())
-	if err == nil || err.Error() != "work-flow returned HTTP 503: PostgreSQL is unavailable" {
+	if err == nil || err.Error() != "Dispatch returned HTTP 503: PostgreSQL is unavailable" {
 		t.Fatalf("Ready() error = %v", err)
 	}
 }

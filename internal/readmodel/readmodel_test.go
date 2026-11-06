@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/daksh-panchal/work-flow/internal/job"
-	"github.com/daksh-panchal/work-flow/internal/worker"
+	"github.com/daksh-panchal/dispatch/internal/job"
+	"github.com/daksh-panchal/dispatch/internal/worker"
 	"github.com/google/uuid"
 )
 

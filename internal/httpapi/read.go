@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/daksh-panchal/work-flow/internal/job"
-	"github.com/daksh-panchal/work-flow/internal/readmodel"
+	"github.com/daksh-panchal/dispatch/internal/job"
+	"github.com/daksh-panchal/dispatch/internal/readmodel"
 	"github.com/google/uuid"
 )
 

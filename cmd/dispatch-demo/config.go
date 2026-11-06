@@ -9,13 +9,13 @@ import (
 
 const (
 	defaultDemoAddress     = "127.0.0.1:5090"
-	defaultWorkFlowAPIURL  = "http://127.0.0.1:5080"
+	defaultDispatchAPIURL  = "http://127.0.0.1:5080"
 	defaultShutdownTimeout = 10 * time.Second
 )
 
 type config struct {
 	HTTPAddress     string
-	WorkFlowAPIURL  string
+	DispatchAPIURL  string
 	ShutdownTimeout time.Duration
 }
 
@@ -24,7 +24,7 @@ type environmentLookup func(string) (string, bool)
 func loadConfig(lookup environmentLookup) (config, error) {
 	configured := config{
 		HTTPAddress:     valueOrDefault(lookup, "DEMO_HTTP_ADDR", defaultDemoAddress),
-		WorkFlowAPIURL:  valueOrDefault(lookup, "WORKFLOW_API_URL", defaultWorkFlowAPIURL),
+		DispatchAPIURL:  valueOrDefault(lookup, "DISPATCH_API_URL", defaultDispatchAPIURL),
 		ShutdownTimeout: defaultShutdownTimeout,
 	}
 	if value, exists := lookup("DEMO_SHUTDOWN_TIMEOUT"); exists && strings.TrimSpace(value) != "" {
@@ -34,10 +34,10 @@ func loadConfig(lookup environmentLookup) (config, error) {
 		}
 		configured.ShutdownTimeout = parsed
 	}
-	parsedURL, err := url.Parse(configured.WorkFlowAPIURL)
+	parsedURL, err := url.Parse(configured.DispatchAPIURL)
 	if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" ||
 		(parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
-		return config{}, fmt.Errorf("WORKFLOW_API_URL must be an absolute HTTP(S) URL")
+		return config{}, fmt.Errorf("DISPATCH_API_URL must be an absolute HTTP(S) URL")
 	}
 	return configured, nil
 }

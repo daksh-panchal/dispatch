@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/daksh-panchal/work-flow/internal/observability"
+	"github.com/daksh-panchal/dispatch/internal/observability"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -71,9 +71,9 @@ func (service *Service) PublishOnce(ctx context.Context) (result PublishResult, 
 	ctx, span := observability.Tracer().Start(ctx, "outbox.publish_batch")
 	defer func() {
 		span.SetAttributes(
-			attribute.Int("workflow.outbox.claimed", result.Claimed),
-			attribute.Int("workflow.outbox.published", result.Published),
-			attribute.Int("workflow.outbox.failed", result.Failed),
+			attribute.Int("dispatch.outbox.claimed", result.Claimed),
+			attribute.Int("dispatch.outbox.published", result.Published),
+			attribute.Int("dispatch.outbox.failed", result.Failed),
 		)
 		if err != nil {
 			span.RecordError(err)

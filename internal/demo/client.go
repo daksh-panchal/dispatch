@@ -64,9 +64,9 @@ type APIError struct {
 
 func (err *APIError) Error() string {
 	if err.Detail == "" {
-		return fmt.Sprintf("work-flow returned HTTP %d", err.Status)
+		return fmt.Sprintf("Dispatch returned HTTP %d", err.Status)
 	}
-	return fmt.Sprintf("work-flow returned HTTP %d: %s", err.Status, err.Detail)
+	return fmt.Sprintf("Dispatch returned HTTP %d: %s", err.Status, err.Detail)
 }
 
 type HTTPClient struct {
@@ -78,10 +78,10 @@ type HTTPClient struct {
 func NewHTTPClient(baseURL string) (*HTTPClient, error) {
 	parsed, err := url.Parse(strings.TrimRight(strings.TrimSpace(baseURL), "/"))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return nil, fmt.Errorf("WORKFLOW_API_URL must be an absolute URL")
+		return nil, fmt.Errorf("DISPATCH_API_URL must be an absolute URL")
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return nil, fmt.Errorf("WORKFLOW_API_URL must use http or https")
+		return nil, fmt.Errorf("DISPATCH_API_URL must use http or https")
 	}
 	return &HTTPClient{
 		baseURL:      parsed,
@@ -97,7 +97,7 @@ func (client *HTTPClient) Ready(ctx context.Context) error {
 	}
 	response, err := client.client.Do(request)
 	if err != nil {
-		return fmt.Errorf("check work-flow readiness: %w", err)
+		return fmt.Errorf("check Dispatch readiness: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -281,7 +281,7 @@ func (client *HTTPClient) OpenEventStream(
 	}
 	response, err := client.streamClient.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("open work-flow event stream: %w", err)
+		return nil, fmt.Errorf("open Dispatch event stream: %w", err)
 	}
 	if response.StatusCode != http.StatusOK {
 		defer response.Body.Close()
@@ -311,7 +311,7 @@ func (client *HTTPClient) doJSON(request *http.Request, destination any, statuse
 		return nil
 	}
 	if err := json.NewDecoder(response.Body).Decode(destination); err != nil {
-		return fmt.Errorf("decode work-flow response: %w", err)
+		return fmt.Errorf("decode Dispatch response: %w", err)
 	}
 	return nil
 }
@@ -324,7 +324,7 @@ func (client *HTTPClient) jsonRequest(
 ) (*http.Request, error) {
 	body, err := json.Marshal(value)
 	if err != nil {
-		return nil, fmt.Errorf("encode work-flow request: %w", err)
+		return nil, fmt.Errorf("encode Dispatch request: %w", err)
 	}
 	request, err := client.request(ctx, method, path, bytes.NewReader(body))
 	if err != nil {
@@ -342,11 +342,11 @@ func (client *HTTPClient) request(
 ) (*http.Request, error) {
 	resolved, err := client.baseURL.Parse(path)
 	if err != nil {
-		return nil, fmt.Errorf("build work-flow URL: %w", err)
+		return nil, fmt.Errorf("build Dispatch URL: %w", err)
 	}
 	request, err := http.NewRequestWithContext(ctx, method, resolved.String(), body)
 	if err != nil {
-		return nil, fmt.Errorf("build work-flow request: %w", err)
+		return nil, fmt.Errorf("build Dispatch request: %w", err)
 	}
 	return request, nil
 }

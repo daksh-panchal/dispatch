@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/daksh-panchal/work-flow/internal/demo"
+	"github.com/daksh-panchal/dispatch/internal/demo"
 	"github.com/google/uuid"
 )
 
@@ -264,7 +264,7 @@ func (handler *Handler) ready(writer http.ResponseWriter, request *http.Request)
 	ctx, cancel := context.WithTimeout(request.Context(), 2*time.Second)
 	defer cancel()
 	if err := handler.scheduler.Ready(ctx); err != nil {
-		handler.writeProblem(writer, http.StatusServiceUnavailable, "Not ready", "Work-Flow is unavailable")
+		handler.writeProblem(writer, http.StatusServiceUnavailable, "Not ready", "Dispatch is unavailable")
 		return
 	}
 	handler.live(writer, request)

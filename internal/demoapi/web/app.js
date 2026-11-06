@@ -206,7 +206,7 @@ function receiveEvent(type, message) {
     renderEvents();
     window.setTimeout(() => refreshSnapshot(true), 80);
   } catch (error) {
-    console.warn("Could not decode Work-Flow event", error);
+    console.warn("Could not decode Dispatch event", error);
   }
 }
 

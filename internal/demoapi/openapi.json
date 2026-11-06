@@ -1,16 +1,16 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "work-flow demo API",
+    "title": "Dispatch demo API",
     "version": "1.0.0",
-    "description": "Local demo control plane that uses the public Work-Flow API."
+    "description": "Local demo control plane that uses the public Dispatch API."
   },
   "paths": {
     "/health/live": {
       "get": { "responses": { "200": { "description": "Demo process is alive" } } }
     },
     "/health/ready": {
-      "get": { "responses": { "200": { "description": "Work-Flow is ready" }, "503": { "description": "Work-Flow is unavailable" } } }
+      "get": { "responses": { "200": { "description": "Dispatch is ready" }, "503": { "description": "Dispatch is unavailable" } } }
     },
     "/api/v1/demo/runs": {
       "get": {
@@ -24,7 +24,7 @@
         "responses": {
           "201": { "description": "Demo jobs and workers created" },
           "400": { "description": "Invalid demo configuration" },
-          "502": { "description": "Work-Flow rejected or could not process setup" }
+          "502": { "description": "Dispatch rejected or could not process setup" }
         }
       }
     },
@@ -37,7 +37,7 @@
     "/api/v1/demo/runs/{runId}/snapshot": {
       "get": {
         "parameters": [{ "$ref": "#/components/parameters/RunId" }],
-        "responses": { "200": { "description": "Run metadata plus current Work-Flow jobs and workers" }, "404": { "description": "Run not found" } }
+        "responses": { "200": { "description": "Run metadata plus current Dispatch jobs and workers" }, "404": { "description": "Run not found" } }
       }
     },
     "/api/v1/demo/runs/{runId}/workers": {
@@ -68,7 +68,7 @@
           { "name": "Last-Event-ID", "in": "header", "schema": { "type": "integer", "minimum": 0 } }
         ],
         "responses": {
-          "200": { "description": "Queue-isolated Work-Flow events", "content": { "text/event-stream": {} } },
+          "200": { "description": "Queue-isolated Dispatch events", "content": { "text/event-stream": {} } },
           "404": { "description": "Run not found" }
         }
       }

@@ -1,6 +1,6 @@
-# Work-Flow
+# Dispatch
 
-Work-Flow is a durable distributed job scheduler written in Go. It accepts
+Dispatch is a durable distributed job scheduler written in Go. It accepts
 jobs, persists their state in PostgreSQL, and coordinates workers that claim and
 execute them safely—even when requests are repeated or workers disappear.
 
@@ -26,7 +26,7 @@ coordination, failure recovery, lifecycle events, and operational visibility.
 ```mermaid
 flowchart LR
     Browser[Demo console] --> Demo[Demo orchestrator]
-    Demo -->|public HTTP API| Scheduler[Work-Flow scheduler]
+    Demo -->|public HTTP API| Scheduler[Dispatch scheduler]
     Scheduler --> Database[(PostgreSQL)]
     Scheduler --> Outbox[Durable event outbox]
     Scheduler -. OTLP .-> Collector[Optional telemetry collector]
@@ -53,7 +53,7 @@ old worker cannot overwrite a newer result.
 transition writes a versioned outbox event in the same transaction. This avoids
 the failure window where database state changes but its corresponding lifecycle
 event is lost. Those durable events support operational history and the
-resumable live stream exposed by Work-Flow.
+resumable live stream exposed by Dispatch.
 
 **The scheduler remains transport-independent.** HTTP handlers translate
 requests into application operations; PostgreSQL code owns persistence; core
@@ -87,8 +87,8 @@ Start PostgreSQL, the scheduler, and the demo console with one command:
 docker compose up --build
 ```
 
-Compose waits for PostgreSQL to become healthy before starting Work-Flow, then
-waits for Work-Flow readiness before starting the demo. When all three services
+Compose waits for PostgreSQL to become healthy before starting Dispatch, then
+waits for Dispatch readiness before starting the demo. When all three services
 are healthy, open [http://127.0.0.1:5090](http://127.0.0.1:5090).
 
 For a useful failure-recovery demonstration:
@@ -126,7 +126,7 @@ To follow logs while running Compose in the background, use:
 
 ```powershell
 docker compose up --build -d
-docker compose logs -f workflow-api workflow-demo
+docker compose logs -f dispatch-api dispatch-demo
 ```
 
 ## Development workflow
@@ -140,21 +140,21 @@ docker compose up -d postgres
 Then start the scheduler and demo in separate terminals:
 
 ```powershell
-go run ./cmd/workflow-api
+go run ./cmd/dispatch-api
 ```
 
 ```powershell
-go run ./cmd/workflow-demo
+go run ./cmd/dispatch-demo
 ```
 
 The API automatically applies embedded migrations and listens on
 `http://127.0.0.1:5080`. The demo listens on `http://127.0.0.1:5090`.
-Example API requests are available in `requests/work-flow.http` and
-`requests/work-flow-demo.http`.
+Example API requests are available in `requests/dispatch.http` and
+`requests/dispatch-demo.http`.
 
 Each demo run receives a unique ordinary queue. The orchestrator submits jobs,
 registers workers, claims work, renews leases, and records outcomes exclusively
-through the public Work-Flow API. Demo run metadata is held in memory and resets
+through the public Dispatch API. Demo run metadata is held in memory and resets
 when the demo process restarts; scheduler jobs, workers, and lifecycle events
 remain durable in PostgreSQL.
 
@@ -198,10 +198,10 @@ RETRY_MAXIMUM=5m
 RECOVERY_INTERVAL=2s
 RECOVERY_BATCH_SIZE=100
 SHUTDOWN_TIMEOUT=10s
-WORKFLOW_ENVIRONMENT=development
-WORKFLOW_VERSION=dev
+DISPATCH_ENVIRONMENT=development
+DISPATCH_VERSION=dev
 DEMO_HTTP_ADDR=127.0.0.1:5090
-WORKFLOW_API_URL=http://127.0.0.1:5080
+DISPATCH_API_URL=http://127.0.0.1:5080
 DEMO_SHUTDOWN_TIMEOUT=10s
 ```
 
@@ -216,7 +216,7 @@ The committed `.env.example` documents every Compose override. The resulting
 `.env` file is ignored by Git and is optional—the built-in values support the
 one-command demo without any setup.
 
-To export traces and metrics, point Work-Flow at any OTLP/HTTP-compatible
+To export traces and metrics, point Dispatch at any OTLP/HTTP-compatible
 collector. Signal-specific OpenTelemetry environment variables are also
 supported by the standard exporters.
 
@@ -238,7 +238,7 @@ network controls and authentication.
 
 ## Standalone scope
 
-Work-Flow's standalone portfolio scope is complete: it provides durable
+Dispatch's standalone portfolio scope is complete: it provides durable
 scheduling, worker coordination, retries, crash recovery, operational reads,
 telemetry instrumentation, and a repeatable interactive demonstration.
 

@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/daksh-panchal/work-flow/internal/job"
-	"github.com/daksh-panchal/work-flow/internal/observability"
+	"github.com/daksh-panchal/dispatch/internal/job"
+	"github.com/daksh-panchal/dispatch/internal/observability"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 )
@@ -74,8 +74,8 @@ func (service *Service) RecoverOnce(ctx context.Context) (job.RecoveryResult, er
 		service.batchSize,
 	)
 	span.SetAttributes(
-		attribute.Int64("workflow.jobs.requeued", result.Requeued),
-		attribute.Int64("workflow.jobs.failed", result.Failed),
+		attribute.Int64("dispatch.jobs.requeued", result.Requeued),
+		attribute.Int64("dispatch.jobs.failed", result.Failed),
 	)
 	if err != nil {
 		span.RecordError(err)

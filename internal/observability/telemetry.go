@@ -19,7 +19,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const instrumentationName = "github.com/daksh-panchal/work-flow"
+const instrumentationName = "github.com/daksh-panchal/dispatch"
 
 type Telemetry struct {
 	TracesEnabled  bool
@@ -41,7 +41,7 @@ func Setup(ctx context.Context, serviceVersion, environment string) (*Telemetry,
 	serviceResource, err := resource.Merge(
 		resource.Default(),
 		resource.NewSchemaless(
-			attribute.String("service.name", "work-flow"),
+			attribute.String("service.name", "dispatch"),
 			attribute.String("service.version", serviceVersion),
 			attribute.String("deployment.environment.name", environment),
 		),

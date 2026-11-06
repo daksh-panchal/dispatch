@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daksh-panchal/work-flow/internal/demo"
+	"github.com/daksh-panchal/dispatch/internal/demo"
 	"github.com/google/uuid"
 )
 
@@ -57,7 +57,7 @@ func TestHandlerServesOpenAPIAndReadiness(t *testing.T) {
 		if response.Code != http.StatusOK {
 			t.Fatalf("GET %s status = %d, want %d", path, response.Code, http.StatusOK)
 		}
-		if path == "/" && !strings.Contains(response.Body.String(), "Work-Flow · Demo Console") {
+		if path == "/" && !strings.Contains(response.Body.String(), "Dispatch · Demo Console") {
 			t.Fatal("frontend response does not contain the demo console")
 		}
 	}

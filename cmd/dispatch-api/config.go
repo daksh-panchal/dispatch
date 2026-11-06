@@ -37,8 +37,8 @@ func loadConfig(lookup environmentLookup) (config, error) {
 	configured := config{
 		HTTPAddress:       valueOrDefault(lookup, "HTTP_ADDR", defaultAddress),
 		DatabaseURL:       valueOrDefault(lookup, "DATABASE_URL", defaultDatabaseURL),
-		Environment:       valueOrDefault(lookup, "WORKFLOW_ENVIRONMENT", "development"),
-		ServiceVersion:    valueOrDefault(lookup, "WORKFLOW_VERSION", "dev"),
+		Environment:       valueOrDefault(lookup, "DISPATCH_ENVIRONMENT", "development"),
+		ServiceVersion:    valueOrDefault(lookup, "DISPATCH_VERSION", "dev"),
 		LeaseDuration:     defaultLeaseDuration,
 		RetryBase:         defaultRetryBase,
 		RetryMaximum:      defaultRetryMaximum,

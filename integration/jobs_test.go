@@ -15,14 +15,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/daksh-panchal/work-flow/internal/demo"
-	"github.com/daksh-panchal/work-flow/internal/httpapi"
-	"github.com/daksh-panchal/work-flow/internal/job"
-	"github.com/daksh-panchal/work-flow/internal/outbox"
-	workflowpostgres "github.com/daksh-panchal/work-flow/internal/postgres"
-	"github.com/daksh-panchal/work-flow/internal/readmodel"
-	"github.com/daksh-panchal/work-flow/internal/recovery"
-	"github.com/daksh-panchal/work-flow/internal/worker"
+	"github.com/daksh-panchal/dispatch/internal/demo"
+	"github.com/daksh-panchal/dispatch/internal/httpapi"
+	"github.com/daksh-panchal/dispatch/internal/job"
+	"github.com/daksh-panchal/dispatch/internal/outbox"
+	dispatchpostgres "github.com/daksh-panchal/dispatch/internal/postgres"
+	"github.com/daksh-panchal/dispatch/internal/readmodel"
+	"github.com/daksh-panchal/dispatch/internal/recovery"
+	"github.com/daksh-panchal/dispatch/internal/worker"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
@@ -58,14 +58,14 @@ func TestJobAPIAgainstPostgreSQL(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 
-	if err := workflowpostgres.Migrate(ctx, pool); err != nil {
+	if err := dispatchpostgres.Migrate(ctx, pool); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	jobRepository := workflowpostgres.NewJobRepository(pool)
-	workerRepository := workflowpostgres.NewWorkerRepository(pool)
-	readRepository := workflowpostgres.NewReadRepository(pool)
+	jobRepository := dispatchpostgres.NewJobRepository(pool)
+	workerRepository := dispatchpostgres.NewWorkerRepository(pool)
+	readRepository := dispatchpostgres.NewReadRepository(pool)
 	jobService := job.NewService(jobRepository, time.Now)
 	const (
 		testLeaseDuration = 250 * time.Millisecond
@@ -297,7 +297,7 @@ func TestJobAPIAgainstPostgreSQL(t *testing.T) {
 
 	t.Run("scheduler statistics reflect durable state", func(t *testing.T) {
 		_ = submitJob(t, server.URL, "integration-"+uuid.NewString(), "observe", http.StatusCreated)
-		statsRepository := workflowpostgres.NewStatsRepository(pool)
+		statsRepository := dispatchpostgres.NewStatsRepository(pool)
 		counts, activeLeases, expiredLeases, pendingEvents, err := statsRepository.ReadSchedulerStats(ctx)
 		if err != nil {
 			t.Fatalf("read scheduler statistics: %v", err)
@@ -762,7 +762,7 @@ func TestJobAPIAgainstPostgreSQL(t *testing.T) {
 		_ = submitJob(t, server.URL, "integration-"+uuid.NewString(), "publish-one", http.StatusCreated)
 		_ = submitJob(t, server.URL, "integration-"+uuid.NewString(), "publish-two", http.StatusCreated)
 
-		outboxRepository := workflowpostgres.NewOutboxRepository(pool)
+		outboxRepository := dispatchpostgres.NewOutboxRepository(pool)
 		now := time.Now().UTC()
 		var expected int
 		if err := pool.QueryRow(ctx, `
@@ -888,7 +888,7 @@ func TestJobAPIAgainstPostgreSQL(t *testing.T) {
 
 	t.Run("expired outbox claim is delivered again", func(t *testing.T) {
 		created := submitJob(t, server.URL, "integration-"+uuid.NewString(), "redeliver", http.StatusCreated)
-		outboxRepository := workflowpostgres.NewOutboxRepository(pool)
+		outboxRepository := dispatchpostgres.NewOutboxRepository(pool)
 		now := time.Now().UTC()
 		firstToken := uuid.New()
 		first, err := outboxRepository.ClaimBatch(ctx, outbox.ClaimParams{

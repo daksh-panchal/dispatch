@@ -5,7 +5,7 @@
 ### Demo backend liveness
 GET {{demoUrl}}/health/live
 
-### Demo backend readiness (includes Work-Flow)
+### Demo backend readiness (includes Dispatch)
 GET {{demoUrl}}/health/ready
 
 ### Start a self-running demo
@@ -27,7 +27,7 @@ GET {{demoUrl}}/api/v1/demo/runs/{{runId}}
 ### Read the run plus durable scheduler jobs and workers
 GET {{demoUrl}}/api/v1/demo/runs/{{runId}}/snapshot
 
-### Watch this run's Work-Flow lifecycle events
+### Watch this run's Dispatch lifecycle events
 GET {{demoUrl}}/api/v1/demo/runs/{{runId}}/events/stream?afterSequence=0
 Accept: text/event-stream
 

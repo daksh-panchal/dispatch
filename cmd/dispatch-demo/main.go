@@ -10,14 +10,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/daksh-panchal/work-flow/internal/demo"
-	"github.com/daksh-panchal/work-flow/internal/demoapi"
+	"github.com/daksh-panchal/dispatch/internal/demo"
+	"github.com/daksh-panchal/dispatch/internal/demoapi"
 )
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	if err := run(logger); err != nil {
-		logger.Error("work-flow demo stopped", "error", err)
+		logger.Error("Dispatch demo stopped", "error", err)
 		os.Exit(1)
 	}
 }
@@ -30,7 +30,7 @@ func run(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	scheduler, err := demo.NewHTTPClient(configured.WorkFlowAPIURL)
+	scheduler, err := demo.NewHTTPClient(configured.DispatchAPIURL)
 	if err != nil {
 		return err
 	}
@@ -47,9 +47,9 @@ func run(logger *slog.Logger) error {
 	serverError := make(chan error, 1)
 	go func() {
 		logger.Info(
-			"work-flow demo API listening",
+			"Dispatch demo API listening",
 			"address", server.Addr,
-			"workflow_api", configured.WorkFlowAPIURL,
+			"dispatch_api", configured.DispatchAPIURL,
 		)
 		serverError <- server.ListenAndServe()
 	}()

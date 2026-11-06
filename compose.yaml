@@ -1,4 +1,4 @@
-name: work-flow
+name: dispatch
 
 services:
   postgres:
@@ -10,7 +10,7 @@ services:
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
-      - workflow-postgres-data:/var/lib/postgresql
+      - dispatch-postgres-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U workflow -d workflow"]
       interval: 2s
@@ -19,10 +19,10 @@ services:
       start_period: 5s
     stop_grace_period: 15s
 
-  workflow-api:
+  dispatch-api:
     build:
       context: .
-      target: workflow-api
+      target: dispatch-api
     environment:
       DATABASE_URL: postgres://workflow:workflow_dev@postgres:5432/workflow?sslmode=disable
       HTTP_ADDR: 0.0.0.0:5080
@@ -32,31 +32,31 @@ services:
       RECOVERY_INTERVAL: ${RECOVERY_INTERVAL:-500ms}
       RECOVERY_BATCH_SIZE: ${RECOVERY_BATCH_SIZE:-100}
       SHUTDOWN_TIMEOUT: ${SHUTDOWN_TIMEOUT:-10s}
-      WORKFLOW_ENVIRONMENT: demo
-      WORKFLOW_VERSION: local
+      DISPATCH_ENVIRONMENT: demo
+      DISPATCH_VERSION: local
     ports:
-      - "127.0.0.1:${WORKFLOW_API_PORT:-5080}:5080"
+      - "127.0.0.1:${DISPATCH_API_PORT:-5080}:5080"
     depends_on:
       postgres:
         condition: service_healthy
     init: true
     stop_grace_period: 15s
 
-  workflow-demo:
+  dispatch-demo:
     build:
       context: .
-      target: workflow-demo
+      target: dispatch-demo
     environment:
       DEMO_HTTP_ADDR: 0.0.0.0:5090
-      WORKFLOW_API_URL: http://workflow-api:5080
+      DISPATCH_API_URL: http://dispatch-api:5080
       DEMO_SHUTDOWN_TIMEOUT: ${DEMO_SHUTDOWN_TIMEOUT:-10s}
     ports:
-      - "127.0.0.1:${WORKFLOW_DEMO_PORT:-5090}:5090"
+      - "127.0.0.1:${DISPATCH_DEMO_PORT:-5090}:5090"
     depends_on:
-      workflow-api:
+      dispatch-api:
         condition: service_healthy
     init: true
     stop_grace_period: 15s
 
 volumes:
-  workflow-postgres-data:
+  dispatch-postgres-data:
